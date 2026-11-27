@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
 import type { Kernel } from '@ayatodoist/core-kernel';
+import { SqliteAyaStore } from '@ayatodoist/database';
 import { handleUploads } from './uploads';
+import { AyaService } from './aya-service';
+import { createAyaApi } from './aya-api';
 
 /**
  * Origins allowed to talk to the local API: the web app on loopback, the
@@ -40,11 +43,28 @@ function corsHeaders(origin: string | null, requestHeaders?: string | null): Rec
   };
 }
 
-export function createServerApp(kernel: Kernel) {
+export function createServerApp(kernel: Kernel, ayaStore?: SqliteAyaStore) {
   const app = new Hono();
+  // A standalone app (tests, embedded use) still gets a working Aya API; the
+  // server passes its file-backed store so every route shares one database.
+  const store = ayaStore ?? new SqliteAyaStore(':memory:');
+  const ayaService = new AyaService({ kernel, adapter: store });
+  void ayaService.init();
 
   // CORS for every route, including the preflight itself.
   app.use('*', async (c, next) => {
+    const origin = c.req.header('origin') ?? null;
+    if (c.req.method === 'OPTIONS') {
+      if (!isAllowedOrigin(origin)) return c.body(null, 403);
+      return c.body(null, 204, corsHeaders(origin, c.req.header('access-control-request-headers')));
+    }
+    await next();
+    for (const [key, value] of Object.entries(corsHeaders(origin))) c.res.headers.set(key, value);
+  });
+
+  // Explicit extension CORS for the Aya API: web (loopback), Chrome/Firefox/Safari
+  // extension origins and `file://` are the same allowlist as every other route.
+  app.use('/api/aya/*', async (c, next) => {
     const origin = c.req.header('origin') ?? null;
     if (c.req.method === 'OPTIONS') {
       if (!isAllowedOrigin(origin)) return c.body(null, 403);
@@ -97,6 +117,10 @@ export function createServerApp(kernel: Kernel) {
   });
 
   app.route('/api/v1/uploads', handleUploads());
+
+  // Aya: providers, models, routing, settings, conversations, chat + SSE,
+  // proactive inbox, memory and channels.
+  app.route('/api/aya', createAyaApi({ kernel, store, service: ayaService }));
 
   app.notFound((c) => c.json({ ok: false, error: { code: 'not-found', message: 'Unknown route' } }, 404));
 

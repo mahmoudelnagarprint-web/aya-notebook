@@ -1,7 +1,7 @@
 import type { Kernel } from '@ayatodoist/core-kernel';
 import type { AyaModel } from '@ayatodoist/shared-types';
 import type { SqliteAyaStore } from '@ayatodoist/database';
-import { cleanApiKey, normalizeBaseUrl, probeModel, redactSecret } from '../../../plugins/plugin-ai-agent/src/aya/providers';
+import { cleanApiKey, fetchProviderModels, normalizeBaseUrl, probeModel, redactSecret } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 
 export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
 
@@ -116,13 +116,14 @@ export class AyaService {
     return this.addManualModel(providerId, { modelId, label });
   }
 
-  async updateModel(id: string, patch: { failover?: boolean; label?: string; priority?: number; enabled?: boolean }): Promise<any> {
+  async updateModel(id: string, patch: { failover?: boolean; label?: string; priority?: number; enabled?: boolean; vision?: boolean }): Promise<any> {
     const model = this.adapter.listModels().find((entry) => entry.id === id);
     if (!model) throw new Error(`Unknown model: ${id}`);
 
     const next: AyaModel = { ...model };
     if (patch.failover !== undefined) next.failover = patch.failover;
     if (patch.enabled !== undefined) next.enabled = patch.enabled;
+    if (patch.vision !== undefined) next.vision = patch.vision;
     if (patch.priority !== undefined && Number.isFinite(patch.priority)) next.priority = patch.priority;
     if (patch.label !== undefined && patch.label.trim()) next.label = patch.label.trim();
     if (!next.label) next.label = next.modelId;
@@ -154,6 +155,48 @@ export class AyaService {
       lastError: result.error ? redactSecret(result.error, provider.apiKey ?? '').slice(0, 200) : null,
     };
     return this.adapter.saveModel(next);
+  }
+
+  /**
+   * Imports every model the provider advertises, keeping existing rows (and
+   * their probe results) untouched. The returned list is what the settings
+   * screen renders immediately after «جلب واختبار».
+   */
+  async fetchModels(providerId: string): Promise<{ models: any[]; latencyMs: number; probed: number }> {
+    const provider = this.adapter.listProviders().find((entry) => entry.id === providerId);
+    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+
+    const { models: discovered, latencyMs } = await fetchProviderModels({
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey ?? '',
+      fetchImpl: this.fetchImpl,
+    });
+
+    const existing = this.adapter.listModels(providerId);
+    let priority = existing.reduce((max, model) => Math.max(max, Number(model.priority ?? 0)), 0);
+    let probed = 0;
+    for (const entry of discovered) {
+      if (existing.some((model) => model.modelId === entry.modelId)) continue;
+      priority += 1;
+      this.adapter.saveModel({
+        id: `${providerId}_${entry.modelId}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) + `_${Math.random().toString(36).slice(2, 6)}`,
+        providerId,
+        modelId: entry.modelId,
+        label: entry.label || entry.modelId,
+        contextWindow: entry.contextWindow,
+        vision: entry.vision,
+        priority,
+        failover: true,
+        enabled: true,
+        status: 'unknown',
+        latencyMs: null,
+        lastTestedAt: null,
+        createdAt: new Date().toISOString(),
+      });
+      probed += 1;
+    }
+
+    return { models: this.adapter.listModels(providerId), latencyMs, probed };
   }
 
   async listProviders(): Promise<any[]> {

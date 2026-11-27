@@ -38,8 +38,8 @@ export function createServerKernel(): { kernel: Kernel; ayaStore: SqliteAyaStore
   return { kernel, ayaStore };
 }
 
-const { kernel } = createServerKernel();
-const app = createServerApp(kernel);
+const { kernel, ayaStore } = createServerKernel();
+const app = createServerApp(kernel, ayaStore);
 
 // `PORT=0` (set by some hosts) would bind a random port; the local API is always 8787.
 const requested = Number(process.env.PORT);
