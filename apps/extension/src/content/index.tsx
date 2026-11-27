@@ -146,6 +146,10 @@ async function boot() {
       sendResponse({ text, title: document.title, url: location.href });
       return true;
     }
+    if (msg?.type === 'CAPTURE_IMAGE_FROM_DOM') {
+      void captureImageFromDom(String(msg.srcUrl ?? '')).then((result) => sendResponse(result));
+      return true;
+    }
     if (msg?.type === 'aya-attach-image' && msg.url) {
       attachment = { url: String(msg.url), preview: msg.preview, name: 'صورة' };
       if (drawerOpen) renderAttachment();
@@ -217,6 +221,134 @@ function sendMessage<T = any>(message: unknown): Promise<T | null> {
       resolve(null);
     }
   });
+}
+
+/* ------------------------------------------------ in-page image capture */
+
+interface CapturedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dpr: number;
+}
+
+function absoluteUrl(url: string): string {
+  try {
+    return new URL(url, location.href).href;
+  } catch {
+    return url;
+  }
+}
+
+/** The `<img>` the user right-clicked, matched by src, currentSrc or file name. */
+function findPageImage(srcUrl: string): HTMLImageElement | null {
+  const target = absoluteUrl(srcUrl);
+  const images = Array.from(document.images);
+  const exact = images.find(
+    (img) =>
+      img.currentSrc === target ||
+      img.src === target ||
+      absoluteUrl(img.getAttribute('src') ?? '') === target,
+  );
+  if (exact) return exact;
+
+  const file = (() => {
+    try {
+      return decodeURIComponent(target.split('/').pop() ?? '');
+    } catch {
+      return target.split('/').pop() ?? '';
+    }
+  })();
+  if (file.length > 6) {
+    const byName = images.filter((img) => (img.currentSrc || img.src || '').includes(file));
+    if (byName.length === 1) return byName[0]!;
+  }
+
+  const visible = images
+    .filter((img) => {
+      const rect = img.getBoundingClientRect();
+      return (
+        rect.width >= 64 &&
+        rect.height >= 64 &&
+        rect.bottom > 0 &&
+        rect.top < window.innerHeight &&
+        rect.right > 0 &&
+        rect.left < window.innerWidth
+      );
+    })
+    .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight);
+  return visible[0] ?? null;
+}
+
+function rectOf(img: HTMLImageElement): CapturedRect {
+  const rect = img.getBoundingClientRect();
+  const x = Math.max(0, rect.left);
+  const y = Math.max(0, rect.top);
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.min(rect.width, window.innerWidth - x)),
+    height: Math.max(0, Math.min(rect.height, window.innerHeight - y)),
+    dpr: window.devicePixelRatio || 1,
+  };
+}
+
+/**
+ * Draws the element into an offscreen canvas. A CORS-enabled clone is tried
+ * first so hotlink-protected CDNs can still be read; a tainted canvas throws
+ * `SecurityError`, which is reported so the worker can crop a screenshot.
+ */
+async function imageToDataUrl(img: HTMLImageElement): Promise<string | null> {
+  const candidates: HTMLImageElement[] = [img];
+  try {
+    const clone = new Image();
+    clone.crossOrigin = 'anonymous';
+    clone.src = img.currentSrc || img.src;
+    await clone.decode();
+    candidates.unshift(clone);
+  } catch {
+    /* clone not readable — the original may still work */
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const width = candidate.naturalWidth || img.naturalWidth || img.width;
+      const height = candidate.naturalHeight || img.naturalHeight || img.height;
+      if (!width || !height) continue;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) continue;
+      context.drawImage(candidate, 0, 0, width, height);
+      return canvas.toDataURL('image/png');
+    } catch {
+      /* tainted canvas — try the next candidate */
+    }
+  }
+  return null;
+}
+
+async function captureImageFromDom(srcUrl: string): Promise<{
+  ok: boolean;
+  dataUrl?: string;
+  rect?: CapturedRect;
+  reason?: string;
+  error?: string;
+}> {
+  const img = findPageImage(srcUrl);
+  if (!img) return { ok: false, error: 'الصورة غير موجودة في الصفحة' };
+
+  const dataUrl = await imageToDataUrl(img);
+  if (dataUrl) return { ok: true, dataUrl, rect: rectOf(img) };
+
+  // Tainted image: scroll it fully into view so the worker can crop it.
+  img.scrollIntoView({ block: 'center', inline: 'center' });
+  await new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+  return { ok: false, reason: 'tainted', rect: rectOf(img) };
 }
 
 /* ---------------------------------------------------------------- handle */

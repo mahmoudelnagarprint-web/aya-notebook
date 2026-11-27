@@ -65,15 +65,30 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     category: 'tasks',
     title: 'Create a task',
     titleAr: 'إنشاء مهمة',
-    description: 'Creates a new task (inbox by default) with optional project, section, label names, due date/time, recurrence, deadline and duration.',
+    description:
+      'Creates a task (title + optional project, description, labels, due date/time, priority, recurrence). Always compute dueDate/dueTime from the current date and clock given in the system prompt — never pass relative text like "in 1 hour".',
     input: z.object({
-      content: z.string().min(1),
-      projectId: z.string().optional(),
+      content: z.string().min(1).describe('Task title — the short line the user sees (e.g. "أقفل التكييف").'),
+      projectId: z
+        .string()
+        .optional()
+        .describe('Id of an existing project from the Projects list in the system prompt. Omit only when no project fits; the task then lands in Inbox.'),
       sectionId: z.string().nullable().optional(),
-      labelNames: z.array(z.string()).optional(),
-      description: z.string().optional(),
-      dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
-      dueTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).optional(),
+      labelNames: z
+        .array(z.string())
+        .optional()
+        .describe('Label names from the Labels list. Unknown names are created on the fly.'),
+      description: z.string().optional().describe('Longer notes / details for the task.'),
+      dueDate: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .optional()
+        .describe('Due date as YYYY-MM-DD, calculated from the current date. Never pass "today", "tomorrow" or "in 1 hour".'),
+      dueTime: z
+        .string()
+        .regex(/^([01]\d|2[0-3]):[0-5]\d$/)
+        .optional()
+        .describe('Due time as 24-hour HH:mm, calculated from the current clock (e.g. now 01:05 + 1 hour → 02:05). Never pass relative text.'),
       deadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       durationMinutes: z.number().int().min(0).max(24 * 60).nullable().optional(),
       // Accepts both the structured rule and the shorthand string ("every week")
@@ -88,7 +103,13 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
           strict: z.boolean().optional(),
         }),
       ]).optional(),
-      priority: z.number().int().min(1).max(4).optional(),
+      priority: z
+        .number()
+        .int()
+        .min(1)
+        .max(4)
+        .optional()
+        .describe('1 = p1 (critical), 2 = p2 (time-critical reminders such as appliance timers or appointments), 3 = p3 (default), 4 = p4 (someday).'),
       orderKey: z.string().optional(),
     }),
     handler: (input: any, ctx: CommandContext) => {

@@ -141,7 +141,7 @@ async function handleMenuClick(id: string, info: any, tab: any) {
   if (id === MENU.imageAnalyze || id === MENU.imageTask) {
     const srcUrl: string = info.srcUrl || '';
     if (!srcUrl) return toastTab(tabId, 'الصورة غير متاحة');
-    const upload = await uploadRemoteImage(srcUrl, tabId);
+    const upload = await uploadRemoteImage(srcUrl, tabId, tab?.windowId);
     if (!upload) return;
     if (id === MENU.imageTask) {
       const outcome = await createWithOffline({
@@ -279,28 +279,177 @@ function dataUrlToBlob(dataUrl: string): Blob {
   return new Blob([bytes], { type });
 }
 
-async function uploadRemoteImage(srcUrl: string, tabId: number | undefined) {
+async function blobToDataUrl(blob: Blob): Promise<string | undefined> {
+  if (blob.size >= 2_500_000) return undefined;
+  const value = await new Promise<string | null>((resolve) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    } catch {
+      resolve(null);
+    }
+  });
+  return value ?? undefined;
+}
+
+interface ImageRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dpr: number;
+}
+
+interface DomCapture {
+  ok: boolean;
+  dataUrl?: string;
+  rect?: ImageRect;
+  reason?: string;
+  error?: string;
+}
+
+/**
+ * Image capture for right-click actions, in three tiers:
+ *
+ * 1. background `fetch` with the user's cookies — covers most CDNs;
+ * 2. in-page canvas of the matching `<img>` — bypasses hotlink protection and
+ *    CORS-less CDNs (Facebook/Instagram/Pinterest);
+ * 3. crop of a `captureVisibleTab` screenshot at the element's rectangle — the
+ *    last resort when the canvas is tainted by a cross-origin image.
+ */
+async function uploadRemoteImage(srcUrl: string, tabId: number | undefined, windowId?: number) {
+  const name = srcUrl.split('/').pop()?.split('?')[0] || 'image.png';
   try {
-    const response = await fetch(srcUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const name = srcUrl.split('/').pop()?.split('?')[0] || 'image.png';
+    let blob: Blob | null = null;
+    let dataUrl: string | undefined;
+
+    /* tier 1 ------------------------------------------------------------ */
+    try {
+      const response = await fetch(srcUrl, { credentials: 'include' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const fetched = await response.blob();
+      if (fetched.size) blob = fetched;
+    } catch {
+      blob = null;
+    }
+
+    /* tier 2 ------------------------------------------------------------ */
+    let dom: DomCapture | null = null;
+    if (!blob && tabId) {
+      dom = await requestDomCapture(tabId, srcUrl);
+      if (dom?.ok && dom.dataUrl) {
+        blob = dataUrlToBlob(dom.dataUrl);
+        dataUrl = dom.dataUrl;
+      }
+    }
+
+    /* tier 3 ------------------------------------------------------------ */
+    if (!blob) {
+      const rect = dom?.rect ?? (tabId ? await rectFromPage(tabId, srcUrl) : null);
+      if (rect) blob = await cropFromVisibleTab(rect, windowId);
+    }
+
+    if (!blob) throw new Error('تعذر قراءة الصورة من الصفحة');
+
     const file = new File([blob], name, { type: blob.type || 'image/png' });
     const upload = await ayaServer.upload(file, name);
-    let dataUrl: string | undefined;
-    if (blob.size < 2_500_000) {
-      dataUrl = await new Promise<string | null>((resolve) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
-      }) ?? undefined;
-    }
+    if (!dataUrl) dataUrl = await blobToDataUrl(blob);
     return { ...upload, dataUrl };
   } catch (err) {
     toastTab(tabId, `تعذر رفع الصورة: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
+}
+
+/** Asks the page's content script to canvas-draw the image (or report its rect). */
+function requestDomCapture(tabId: number, srcUrl: string): Promise<DomCapture | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.sendMessage(tabId, { type: 'CAPTURE_IMAGE_FROM_DOM', srcUrl }, (response: DomCapture) => {
+        if (chrome.runtime?.lastError) resolve(null);
+        else resolve(response ?? null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Works even when no content script is listening (e.g. a restored tab). */
+async function rectFromPage(tabId: number, srcUrl: string): Promise<ImageRect | null> {
+  try {
+    const rows = await new Promise<any[]>((resolve, reject) => {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId },
+          args: [srcUrl],
+          func: (targetUrl: string) => {
+            const images = Array.from(document.images);
+            const exact = images.find(
+              (img) =>
+                img.currentSrc === targetUrl || img.src === targetUrl || img.getAttribute('src') === targetUrl,
+            );
+            const fallback = images
+              .filter((img) => img.getBoundingClientRect().width >= 64)
+              .sort((a, b) => b.naturalWidth * b.naturalHeight - a.naturalWidth * a.naturalHeight)[0];
+            const img = exact ?? fallback ?? null;
+            if (!img) return null;
+            img.scrollIntoView({ block: 'center', inline: 'center' });
+            const rect = img.getBoundingClientRect();
+            if (rect.width < 8 || rect.height < 8) return null;
+            return {
+              x: Math.max(0, rect.left),
+              y: Math.max(0, rect.top),
+              width: Math.min(rect.width, window.innerWidth - Math.max(0, rect.left)),
+              height: Math.min(rect.height, window.innerHeight - Math.max(0, rect.top)),
+              dpr: window.devicePixelRatio || 1,
+            };
+          },
+        },
+        (result: any[]) => {
+          if (chrome.runtime?.lastError) reject(new Error(chrome.runtime.lastError.message ?? 'inject failed'));
+          else resolve(result ?? []);
+        },
+      );
+    });
+    return (rows?.[0]?.result as ImageRect) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function captureVisibleTab(windowId?: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const handle = (dataUrl: string) => {
+      if (chrome.runtime?.lastError) reject(new Error(chrome.runtime.lastError.message ?? 'capture failed'));
+      else resolve(dataUrl);
+    };
+    try {
+      if (typeof windowId === 'number') chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, handle);
+      else chrome.tabs.captureVisibleTab({ format: 'png' }, handle);
+    } catch (err) {
+      reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
+}
+
+/** Crops the image rectangle out of a visible-tab screenshot at device pixels. */
+async function cropFromVisibleTab(rect: ImageRect, windowId?: number): Promise<Blob> {
+  const screenshot = await captureVisibleTab(windowId);
+  const bitmap = await createImageBitmap(dataUrlToBlob(screenshot));
+  const ratio = rect.dpr || 1;
+  const sx = Math.round(Math.max(0, rect.x) * ratio);
+  const sy = Math.round(Math.max(0, rect.y) * ratio);
+  const sw = Math.max(1, Math.min(bitmap.width - sx, Math.round(rect.width * ratio)));
+  const sh = Math.max(1, Math.min(bitmap.height - sy, Math.round(rect.height * ratio)));
+  const canvas = new OffscreenCanvas(sw, sh);
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('تعذر تجهيز قصاصة الصورة');
+  context.drawImage(bitmap, sx, sy, sw, sh, 0, 0, sw, sh);
+  bitmap.close?.();
+  return await canvas.convertToBlob({ type: 'image/png' });
 }
 
 /* --------------------------------------------------------------- alarms */

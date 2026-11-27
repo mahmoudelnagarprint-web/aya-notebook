@@ -125,6 +125,75 @@ export function toolResultsNotice(executed: ExecutedTool[]): string {
   return `نتائج الأدوات المنفذة الآن (JSON):\n${JSON.stringify(payload, null, 2)}`;
 }
 
+const TOOL_PAYLOAD_MARKER = /"(?:tool|tool_name|tool_calls|function|arguments|originalName|parameters)"\s*:/;
+
+/** End index (exclusive) of the JSON value that starts at `start`, or -1. */
+function jsonValueEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') depth += 1;
+    else if (char === '}' || char === ']') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+  }
+  return -1;
+}
+
+/** Drops every `{"tool": ... }` / `{"tool_calls": ...}` object from a reply. */
+function removeJsonToolObjects(text: string): string {
+  const starts = /\{\s*"(?:tool|tool_name|tool_calls|function|arguments|originalName)"\s*:/g;
+  let output = '';
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = starts.exec(text)) !== null) {
+    if (match.index < cursor) continue;
+    const end = jsonValueEnd(text, match.index);
+    if (end === -1) break;
+    output += text.slice(cursor, match.index);
+    cursor = end;
+    starts.lastIndex = end;
+  }
+  return output + text.slice(cursor);
+}
+
+/**
+ * Final guard so a chat bubble can never contain a fake tool call.
+ *
+ * Models occasionally imitate the function-calling protocol as text — a raw
+ * `{"tool": "task.create", ...}` object or a ```json fence. That must never
+ * reach the user, so it is stripped here right before the reply is saved.
+ */
+export function stripToolLeaks(text: string): string {
+  let output = String(text ?? '');
+  if (!output.trim()) return '';
+
+  output = output.replace(/<\s*([\w:]+)[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, (block, tag: string) =>
+    /^(?:tool_call|tool_calls|tool_code|function_call|antml:[\w_]+)$/i.test(String(tag)) ? '' : block,
+  );
+  output = output.replace(/<\/?\s*(?:tool_call|tool_calls|tool_code|function_call|antml:[\w_]+)\s*>/gi, '');
+  output = output.replace(/```([\s\S]*?)```/g, (block, body: string) =>
+    TOOL_PAYLOAD_MARKER.test(String(body)) ? '' : block,
+  );
+  output = removeJsonToolObjects(output);
+  output = output.replace(/^\s*"(?:tool|tool_name)"\s*:\s*".*$/gm, '');
+
+  return output
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -251,7 +320,7 @@ export class AyaBrain {
     const first = await this.chat({ routing, messages: baseMessages, system, tools: selectedTools, preferred: modelId });
 
     let batchId: string | null = null;
-    let assistantText = first.text;
+    let assistantText = stripToolLeaks(first.text ?? '');
     let failover = Boolean(first.failover);
     let model = first.model;
     let modelRowId = first.modelRowId;
@@ -290,7 +359,7 @@ export class AyaBrain {
 
       try {
         const narrated = await this.chat({ routing, messages: narrationMessages, system, preferred: modelId });
-        const narratedText = String(narrated.text ?? '').trim();
+        const narratedText = stripToolLeaks(narrated.text ?? '');
         if (narratedText && !isBareAck(narratedText)) {
           assistantText = narratedText;
         } else {
@@ -304,6 +373,7 @@ export class AyaBrain {
       }
     }
 
+    assistantText = stripToolLeaks(assistantText);
     if (!assistantText || isBareAck(assistantText)) assistantText = fallbackNarration(executed);
 
     onEvent?.({ type: 'delta', content: assistantText });

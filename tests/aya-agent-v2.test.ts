@@ -1008,3 +1008,88 @@ describe('Aya v2 — server mutations sync into the browser kernel', () => {
     expect(clientKernel.store.list('tasks')).toHaveLength(1);
   });
 });
+
+describe('Aya v2 — never leaks raw JSON tool blocks into the reply', () => {
+  test('stripToolLeaks removes JSON objects, fences and tool tags', async () => {
+    const { stripToolLeaks } = await import('../plugins/plugin-ai-agent/src/aya/brain');
+    const dirty = [
+      'حطيت التذكير في مشروع المنزل ✅',
+      '```json',
+      '{"tool": "task.create", "arguments": {"content": "أقفل التكييف"}}',
+      '```',
+      '{"tool": "task.create", "arguments": {"content": "أقفل التكييف"}}',
+      '<tool_call>task.create</tool_call>',
+      'هتلاقيها في المنزل الساعة 02:05.',
+    ].join('\n');
+    const clean = stripToolLeaks(dirty);
+    expect(clean).not.toContain('"tool"');
+    expect(clean).not.toContain('task.create');
+    expect(clean).not.toContain('```');
+    expect(clean).toContain('حطيت التذكير في مشروع المنزل');
+    expect(clean).toContain('الساعة 02:05');
+  });
+
+  test('a narration that imitates a tool call is sanitised before it is saved', async () => {
+    await store.saveProvider(provider('p1', 'http://localhost:9999/v1', 'Local Mock'));
+    await store.saveModel(model({ id: 'm1', providerId: 'p1', modelId: 'mock-model', contextWindow: 128_000, priority: 1 }));
+    await store.saveRouting({ chat_deep: 'm1', background_24_7: 'm1', vision: 'm1', memory_summarizer: 'm1' });
+    await store.saveSettings({ ...DEFAULT_AYA_SETTINGS, autonomy: 'full_undo' });
+    await kernel.execute('project.ensureInbox', {});
+
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return jsonResponse({
+          choices: [{ message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'task__create', arguments: JSON.stringify({ content: 'أقفل التكييف', priority: 2 }) } }] } }],
+        });
+      }
+      return jsonResponse({
+        choices: [{ message: { content: 'اتعملت المهمة ✅\n```json\n{"tool": "task.create", "arguments": {"content": "أقفل التكييف"}}\n```' } }],
+      });
+    }) as unknown as typeof fetch;
+
+    const brain = new AyaBrain({ kernel, adapter: store });
+    const turn = await brain.handleMessage({ text: 'فكريني أقفل التكييف كمان ساعة', language: 'ar' });
+    const assistant = turn.messages.find((entry) => entry.role === 'assistant')!;
+    expect(assistant.content).toContain('اتعملت المهمة');
+    expect(assistant.content).not.toContain('"tool"');
+    expect(assistant.content).not.toContain('```');
+  });
+});
+
+describe('Aya v2 — live clock and workspace context in the system prompt', () => {
+  test('carries the exact local date, weekday, 24h/12h time and every project id', async () => {
+    kernel.store.upsert('projects', { id: 'prj_home', name: 'المنزل', isInbox: false, isArchived: false } as never);
+    kernel.store.upsert('projects', { id: 'prj_work', name: 'الشغل', isInbox: false, isArchived: false } as never);
+    kernel.store.upsert('projects', { id: 'prj_inbox', name: 'Inbox', isInbox: true, isArchived: false } as never);
+    kernel.store.upsert('labels', { id: 'lbl_home', name: 'بيت', color: '#0f0' } as never);
+
+    const pinned = new Date(2026, 10, 28, 1, 5, 0);
+    const prompt = buildAyaSystemPrompt({
+      kernel,
+      language: 'ar',
+      memories: [],
+      summary: '',
+      toolCount: 12,
+      pendingInbox: 0,
+      now: pinned,
+    });
+
+    expect(prompt).toContain('2026-11-28');
+    expect(prompt).toContain('السبت');
+    expect(prompt).toContain('01:05');
+    expect(prompt).toContain('1:05 ص');
+    expect(prompt).toContain('prj_home');
+    expect(prompt).toContain('prj_work');
+    expect(prompt).toContain('المنزل');
+    expect(prompt).toContain('lbl_home');
+    expect(prompt).toContain('dueDate (YYYY-MM-DD)');
+    expect(prompt).toContain('ممنوع تمامًا كتابة JSON خام');
+
+    const contextIndex = prompt.indexOf('السياق الحيّ');
+    const personaIndex = prompt.indexOf('أنتِ آية');
+    expect(contextIndex).toBeGreaterThan(-1);
+    expect(contextIndex).toBeLessThan(personaIndex);
+  });
+});
