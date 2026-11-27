@@ -7,6 +7,7 @@ export { AyaModelRouter, sanitizeToolHistory } from './aya/router';
 export { AyaMemoryEngine } from './aya/memory';
 export { AyaProactiveEngine, executeInboxActions } from './aya/proactive';
 export { buildAyaSystemPrompt } from './aya/persona';
+export { ayaApi, ayaApiBase, ayaUrl, AyaApiError } from './aya-client';
 export { suggestRouting, describeRouting } from './aya/routing';
 
 export const aiAgentPlugin: PluginDescriptor = {

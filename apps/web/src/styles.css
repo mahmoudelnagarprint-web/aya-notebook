@@ -3,45 +3,49 @@
 @tailwind utilities;
 
 /* ------------------------------------------------------------------
-   Design tokens — measured from the reference renderer (report 08):
-   sidebar 280px / rows 34px / radius 6, list column 800px, row 42-43px,
-   radii 4/6/8/10/12, durations .15/.2/.25/.3s, cubic-bezier(.4,0,.2,1).
-   Colour channels are stored as `R G B` so Tailwind opacity modifiers work.
+   Design tokens: modern navy shell + crisp light canvas.
+   Channels are stored as `R G B` so Tailwind opacity modifiers work.
+   Dark mode keeps the same structure with a deep slate canvas.
 ------------------------------------------------------------------- */
 :root {
-  --td-canvas: 255 255 255;
-  --td-sidebar: 252 250 248;
-  --td-sidebar-active: 238 238 238;
+  --td-canvas: 242 245 250;      /* #f2f5fa ice canvas */
+  --td-sidebar: 22 38 62;        /* #16263e navy sidebar */
+  --td-sidebar-active: 30 120 255;
   --td-modal: 255 255 255;
-  --td-modal-pane: 252 250 248;
-  --td-text: 32 32 32;
-  --td-text-secondary: 102 102 102;
-  --td-text-subtle: 145 145 145;
-  --td-line: 238 238 238;
-  --td-line-strong: 211 211 211;
-  --td-hover: 245 245 245;
-  --td-accent: 220 76 62;
-  --td-accent-hover: 197 55 39;
-  --td-danger: 209 69 59;
+  --td-modal-pane: 248 250 252;
+  --td-text: 30 41 59;           /* slate-800 */
+  --td-text-secondary: 71 85 105; /* slate-600 */
+  --td-text-subtle: 148 163 184; /* slate-400 */
+  --td-line: 226 232 240;        /* #e2e8f0 */
+  --td-line-strong: 203 213 225;
+  --td-hover: 248 250 252;
+  --td-accent: 30 120 255;       /* #1e78ff royal blue */
+  --td-accent-hover: 22 104 227;
+  --td-danger: 225 29 72;
 
-  --td-priority-1: #d1453b;
-  --td-priority-2: #eb8909;
-  --td-priority-3: #246fe0;
-  --td-priority-4: #a9a9a9;
-  --td-green: #058527;
-  --td-orange: #ad6200;
-  --td-purple: #692ec2;
-  --td-card-border: rgba(0, 0, 0, 0.12);
-  --td-selected: rgba(220, 76, 62, 0.1);
-  --td-ai: #692ec2;
-  --td-ai-tint: rgba(105, 46, 194, 0.12);
-  --td-ai-tint-strong: rgba(105, 46, 194, 0.2);
+  --td-priority-1: #f43f5e;
+  --td-priority-2: #f59e0b;
+  --td-priority-3: #2563eb;
+  --td-priority-4: #94a3b8;
+  --td-green: #10b981;
+  --td-orange: #f59e0b;
+  --td-purple: #7c3aed;
+  --td-card-border: #e2e8f0;
+  --td-selected: rgba(30, 120, 255, 0.08);
+  --td-ai: #7c3aed;
+  --td-ai-tint: rgba(124, 58, 237, 0.1);
+  --td-ai-tint-strong: rgba(124, 58, 237, 0.18);
 
-  --td-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.08);
-  --td-shadow-2: 0 2px 8px rgba(0, 0, 0, 0.16);
-  --td-shadow-3: 0 16px 50px rgba(0, 0, 0, 0.35), 0 4px 7px rgba(0, 0, 0, 0.08);
+  --td-navy-900: #0b1220;
+  --td-navy-800: #132238;
+  --td-navy-700: #16263e;
+  --td-navy-600: #0f1b2d;
 
-  --focus-outer: rgba(31, 96, 194, 0.25);
+  --td-shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --td-shadow-2: 0 8px 24px -16px rgba(15, 23, 42, 0.35);
+  --td-shadow-3: 0 30px 80px -20px rgba(15, 23, 42, 0.55);
+
+  --focus-outer: rgba(30, 120, 255, 0.25);
 
   --animation-shortest: 0.15s;
   --animation-shorter: 0.2s;
@@ -51,38 +55,38 @@
 }
 
 html.dark {
-  --td-canvas: 30 30 30;
-  --td-sidebar: 38 38 38;
-  --td-sidebar-active: 58 58 58;
-  --td-modal: 40 40 40;
-  --td-modal-pane: 34 34 34;
-  --td-text: 238 238 238;
-  --td-text-secondary: 162 162 162;
-  --td-text-subtle: 118 118 118;
-  --td-line: 51 51 51;
-  --td-line-strong: 72 72 72;
-  --td-hover: 45 45 45;
-  --td-accent: 220 76 62;
-  --td-accent-hover: 237 96 82;
-  --td-danger: 255 112 102;
+  --td-canvas: 2 6 23;           /* slate-950 */
+  --td-sidebar: 15 27 45;
+  --td-sidebar-active: 30 120 255;
+  --td-modal: 15 23 42;
+  --td-modal-pane: 2 6 23;
+  --td-text: 226 232 240;
+  --td-text-secondary: 148 163 184;
+  --td-text-subtle: 100 116 139;
+  --td-line: 30 41 59;
+  --td-line-strong: 51 65 85;
+  --td-hover: 30 41 59;
+  --td-accent: 59 130 246;
+  --td-accent-hover: 96 165 250;
+  --td-danger: 251 113 133;
 
-  --td-priority-1: #ff7066;
-  --td-priority-2: #ff9a13;
-  --td-priority-3: #5297ff;
-  --td-priority-4: #a9a9a9;
-  --td-green: #4caf50;
-  --td-orange: #ff9a13;
-  --td-purple: #a06bff;
-  --td-card-border: rgba(255, 255, 255, 0.12);
-  --td-selected: rgba(220, 76, 62, 0.16);
-  --td-ai: #a06bff;
-  --td-ai-tint: rgba(160, 107, 255, 0.14);
-  --td-ai-tint-strong: rgba(160, 107, 255, 0.24);
+  --td-priority-1: #fb7185;
+  --td-priority-2: #fbbf24;
+  --td-priority-3: #60a5fa;
+  --td-priority-4: #94a3b8;
+  --td-green: #34d399;
+  --td-orange: #fbbf24;
+  --td-purple: #a78bfa;
+  --td-card-border: #1e293b;
+  --td-selected: rgba(59, 130, 246, 0.16);
+  --td-ai: #a78bfa;
+  --td-ai-tint: rgba(167, 139, 250, 0.14);
+  --td-ai-tint-strong: rgba(167, 139, 250, 0.24);
 
   --td-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --td-shadow-2: 0 2px 8px rgba(0, 0, 0, 0.5);
-  --td-shadow-3: 0 16px 50px rgba(0, 0, 0, 0.65), 0 4px 7px rgba(0, 0, 0, 0.4);
-  --focus-outer: rgba(82, 151, 255, 0.35);
+  --td-shadow-2: 0 8px 24px -16px rgba(0, 0, 0, 0.6);
+  --td-shadow-3: 0 30px 80px -20px rgba(0, 0, 0, 0.75);
+  --focus-outer: rgba(96, 165, 250, 0.35);
   color-scheme: dark;
 }
 
@@ -120,13 +124,13 @@ body {
   scrollbar-color: rgb(var(--td-line-strong)) transparent;
 }
 *::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgb(var(--td-line-strong) / 0.7);
+  background: rgb(var(--td-line-strong) / 0.8);
   border-radius: 8px;
-  border: 3px solid transparent;
+  border: 2px solid transparent;
   background-clip: padding-box;
 }
 *::-webkit-scrollbar-track {
@@ -138,7 +142,7 @@ body {
   box-shadow: 0 0 0 2px var(--focus-outer);
 }
 
-/* quick add editor */
+/* quick add editor (kept for the Tiptap editor plugin) */
 .quick-add-editor {
   font-size: 16px;
   line-height: 23px;
@@ -163,7 +167,7 @@ body {
   color: rgb(var(--td-text-subtle));
 }
 
-/* NLP pills (measured: bg rgb(253,231,216), radius 4px, padding 0 4px) */
+/* NLP pills */
 .nlp-pill {
   background: #fde7d8;
   color: #202020;
@@ -177,42 +181,42 @@ body {
   background: #fbd4b8;
 }
 .nlp-pill[data-nlp-type='priority'] {
-  background: rgba(235, 137, 9, 0.2);
+  background: rgba(245, 158, 11, 0.18);
 }
 .nlp-pill[data-nlp-type='project'] {
-  background: rgba(36, 111, 224, 0.16);
+  background: rgba(37, 99, 235, 0.14);
 }
 .nlp-pill[data-nlp-type='label'] {
-  background: rgba(5, 133, 39, 0.14);
+  background: rgba(16, 185, 129, 0.14);
 }
 .nlp-pill[data-nlp-type='recurrence'] {
-  background: rgba(105, 46, 194, 0.16);
+  background: rgba(124, 58, 237, 0.14);
 }
 html.dark .nlp-pill {
-  background: #4a3527;
-  color: #f0e6dd;
+  background: #43302a;
+  color: #f1e7e1;
 }
 html.dark .nlp-pill:hover {
-  background: #5a4030;
+  background: #543b31;
 }
 html.dark .nlp-pill[data-nlp-type='priority'] {
-  background: rgba(255, 154, 19, 0.22);
+  background: rgba(251, 191, 36, 0.22);
 }
 html.dark .nlp-pill[data-nlp-type='project'] {
-  background: rgba(82, 151, 255, 0.22);
+  background: rgba(96, 165, 250, 0.22);
 }
 html.dark .nlp-pill[data-nlp-type='label'] {
-  background: rgba(76, 175, 80, 0.22);
+  background: rgba(52, 211, 153, 0.22);
 }
 html.dark .nlp-pill[data-nlp-type='recurrence'] {
-  background: rgba(160, 107, 255, 0.22);
+  background: rgba(167, 139, 250, 0.22);
 }
 
-/* motion (report 08 §5) */
+/* motion */
 @keyframes modal-appear {
   from {
     opacity: 0;
-    transform: scale(0.96) translateY(4px);
+    transform: scale(0.97) translateY(6px);
   }
   to {
     opacity: 1;
@@ -237,7 +241,7 @@ html.dark .nlp-pill[data-nlp-type='recurrence'] {
 }
 @keyframes highlight-flash {
   from {
-    background: rgb(255, 255, 204);
+    background: rgb(255 255 204);
   }
   to {
     background: transparent;
@@ -269,7 +273,7 @@ html.dark .nlp-pill[data-nlp-type='recurrence'] {
   }
 }
 
-/* sidebar collapsed transition */
+/* sidebar collapse */
 .app-sidebar {
   transition: width var(--animation-shorter) var(--td-ease), transform var(--animation-shorter) var(--td-ease);
 }
