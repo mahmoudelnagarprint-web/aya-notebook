@@ -95,10 +95,23 @@ async function boot() {
 
   document.addEventListener('mouseup', scheduleSelectionCheck, true);
   document.addEventListener('keyup', scheduleSelectionCheck, true);
-  document.addEventListener('mousedown', (event) => {
-    // Shadow-DOM clicks are retargeted to the host, so inspect the composed path.
-    if (!toolbarEl || !event.composedPath().includes(toolbarEl)) hideToolbar();
-  }, true);
+  // Clicks inside the closed shadow tree are retargeted to the host, so the page
+  // listener must ignore them and the shadow listener decides per element.
+  document.addEventListener(
+    'mousedown',
+    (event) => {
+      if (event.composedPath()[0] === host) return;
+      hideToolbar();
+    },
+    true,
+  );
+  shadow.addEventListener(
+    'mousedown',
+    (event) => {
+      if (toolbarEl && !event.composedPath().includes(toolbarEl)) hideToolbar();
+    },
+    true,
+  );
   window.addEventListener('scroll', hideToolbar, true);
   window.addEventListener('resize', () => applyHandle(), true);
 
@@ -197,7 +210,7 @@ function showToast(
   action.textContent = options.actionLabel ?? 'فتح اللوحة';
   action.addEventListener('click', () => {
     if (options.onAction) options.onAction();
-    else chrome.runtime.sendMessage({ type: 'aya-open-sidepanel' }).catch(() => {});
+    else void sendMessage({ type: 'aya-open-sidepanel' });
     toast.remove();
   });
   toast.appendChild(action);
@@ -210,15 +223,62 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 }
 
+const RELOAD_HINT = 'تم تحديث الإضافة — أعد تحميل الصفحة (F5) لتفعيلها';
+
+let invalidatedNotified = false;
+
+/** After an extension reload/update the orphaned content script has no runtime. */
+function extensionAlive(): boolean {
+  try {
+    return Boolean(chrome?.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
+function isInvalidatedError(error: unknown): boolean {
+  const text =
+    typeof error === 'string' ? error : `${(error as any)?.message ?? ''} ${String(error ?? '')}`;
+  return /extension context invalidated|context invalidated/i.test(text) || !extensionAlive();
+}
+
+function warnInvalidated(): void {
+  if (invalidatedNotified) return;
+  invalidatedNotified = true;
+  showToast(RELOAD_HINT, { state: 'err' });
+}
+
+/**
+ * Every worker call goes through here: an orphaned content script throws
+ * `Extension context invalidated` instead of rejecting, which used to surface
+ * as an uncaught error — now it resolves `null` and shows a reload toast.
+ */
 function sendMessage<T = any>(message: unknown): Promise<T | null> {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: T | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
     try {
+      if (!extensionAlive()) {
+        warnInvalidated();
+        finish(null);
+        return;
+      }
       chrome.runtime.sendMessage(message, (response: T) => {
-        if (chrome.runtime?.lastError) resolve(null);
-        else resolve(response ?? null);
+        const error = chrome.runtime?.lastError?.message;
+        if (error) {
+          if (isInvalidatedError(error)) warnInvalidated();
+          finish(null);
+          return;
+        }
+        finish(response ?? null);
       });
-    } catch {
-      resolve(null);
+    } catch (err) {
+      if (isInvalidatedError(err)) warnInvalidated();
+      finish(null);
     }
   });
 }
@@ -381,11 +441,10 @@ function renderHandle() {
   `;
   rootEl.appendChild(handleEl);
 
-  // Right-click opens the full side panel; a plain click toggles the floating bar.
-  handleEl.addEventListener('contextmenu', (event) => {
-    event.preventDefault();
-    void sendMessage({ type: 'TOGGLE_SIDE_PANEL' });
-  });
+  // No page context menu over the floating handle. `chrome.sidePanel.open()` is
+  // rejected for content-script messages (no extension user gesture), so the
+  // handle only ever drives the in-page drawer.
+  handleEl.addEventListener('contextmenu', (event) => event.preventDefault());
   handleEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -399,6 +458,7 @@ function renderHandle() {
   let startTop = 0;
 
   handleEl.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
     if ((event.target as HTMLElement).closest('.k-handle-plus')) return;
     dragging = true;
     moved = false;
@@ -419,12 +479,14 @@ function renderHandle() {
   handleEl.addEventListener('pointerup', (event) => {
     if (!dragging || !handleEl) return;
     dragging = false;
+    const primary = event.button === 0;
     handleEl.classList.remove('dragging');
     handleEl.releasePointerCapture(event.pointerId);
     const top = Math.round(handleEl.getBoundingClientRect().top);
     settings.handleY = Math.max(12, top);
     void chrome.storage.local.set({ 'aya:settings': settings, 'aya:handleY': settings.handleY });
-    if (!moved) toggleDrawer();
+    // One click opens the floating drawer in this page, the next click closes it.
+    if (primary && !moved) toggleDrawer();
   });
 }
 
@@ -476,6 +538,36 @@ function hideToolbar() {
   if (toolbarEl) toolbarEl.style.display = 'none';
 }
 
+/**
+ * Runs a mini-toolbar action from the captured selection. The text is read
+ * before any blur happens, so the page selection is never needed afterwards.
+ */
+function runSelectionAction(kind: string, text: string): void {
+  const value = String(text ?? '').trim();
+  hideToolbar();
+  window.getSelection()?.removeAllRanges();
+  if (!value) return;
+
+  if (kind === 'ask') {
+    openDrawer(`اسألي عن النص المحدد:\n«${value}»\n\nالمصدر: ${document.title} (${location.href})`);
+    return;
+  }
+
+  showToast('⏳ جاري الحفظ...');
+  void sendMessage<{ ok: boolean; message?: string }>({
+    type: 'aya-selection-action',
+    kind,
+    text: value,
+    title: document.title,
+    url: location.href,
+  }).then((response) => {
+    if (!response) return; // an invalidated context already showed its toast
+    showToast(response.message ?? (response.ok ? '✓ تم الحفظ' : 'تعذر تنفيذ الإجراء'), {
+      state: response.ok === false ? 'err' : 'ok',
+    });
+  });
+}
+
 function renderToolbar() {
   if (!toolbarEl) return;
   const buttons: Array<{ kind: string; label: string; cls: string }> = [
@@ -488,22 +580,21 @@ function renderToolbar() {
   for (const button of buttons) {
     const el = document.createElement('button');
     el.className = `k-tool ${button.cls}`;
+    el.type = 'button';
     el.textContent = button.label;
-    el.addEventListener('mousedown', (event) => event.preventDefault());
-    el.addEventListener('click', () => {
-      const text = selectionText;
-      hideToolbar();
-      window.getSelection()?.removeAllRanges();
-      if (!text) return;
-      if (button.kind === 'ask') {
-        openDrawer(`اسألي عن النص المحدد:\n«${text}»\n\nالمصدر: ${document.title} (${location.href})`);
-        return;
-      }
-      void sendMessage({ type: 'aya-selection-action', kind: button.kind, text, title: document.title, url: location.href }).then(
-        (response: any) => {
-          showToast(response?.message ?? 'تعذر تنفيذ الإجراء', { state: response?.ok === false ? 'err' : 'ok' });
-        },
-      );
+    // `click` never fires once mousedown blurs the page selection, so the action
+    // runs on mousedown with the selection captured up front.
+    el.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runSelectionAction(button.kind, selectionText);
+    });
+    el.addEventListener('click', (event) => event.preventDefault());
+    el.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      runSelectionAction(button.kind, selectionText);
     });
     toolbarEl.appendChild(el);
   }
@@ -553,7 +644,7 @@ function ensureDrawer(): HTMLElement {
 
   drawerEl.querySelector('[data-act="close"]')!.addEventListener('click', closeDrawer);
   drawerEl.querySelector('[data-act="sidepanel"]')!.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'aya-open-sidepanel' }).catch(() => {});
+    void sendMessage({ type: 'aya-open-sidepanel' });
   });
   drawerEl.querySelector('[data-act="theme"]')!.addEventListener('click', async () => {
     theme = theme === 'dark' ? 'light' : 'dark';

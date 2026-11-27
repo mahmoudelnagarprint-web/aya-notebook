@@ -30,43 +30,88 @@ const MENU = {
 // register synchronously, and bootstrap finishes on its own microtask.
 void (async () => {
   await ensureStorage();
-  buildContextMenus();
+  configureSidePanel();
+  await registerContextMenus();
   startupAlarms();
   await refreshBadge();
 })();
 
 /* ---------------------------------------------------------- context menus */
 
-function buildContextMenus() {
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: ROOT,
-      title: '__AYAtodoist · آية',
-      contexts: ['selection', 'image', 'page', 'link'],
+/**
+ * Toolbar-icon clicks open the native side panel. Doing it through
+ * `setPanelBehavior` keeps the real extension user gesture, which
+ * `chrome.sidePanel.open()` lacks when a content script asks for it.
+ */
+function configureSidePanel(): void {
+  try {
+    chrome.sidePanel?.setPanelBehavior?.({ openPanelOnActionClick: true }, () => {
+      void chrome.runtime?.lastError;
     });
+  } catch {
+    /* sidePanel is missing before Chrome 114 */
+  }
+}
 
-    const items: Array<{ id: string; title: string; contexts: string[] }> = [
-      { id: MENU.addTask, title: '➕ إضافة كمهمة في النوتبوك', contexts: ['selection'] },
-      { id: MENU.note, title: '📝 حفظ كملاحظة / مرجع', contexts: ['selection'] },
-      { id: MENU.checklist, title: '☑️ تحويل إلى قائمة تشيك بوكس', contexts: ['selection'] },
-      { id: MENU.ask, title: '✨ اسألي / عالجي النص مع آية', contexts: ['selection'] },
-      { id: MENU.imageAnalyze, title: '🖼️ تحليل الصورة واستخراج مهام مع آية', contexts: ['image'] },
-      { id: MENU.imageTask, title: '📌 حفظ الصورة داخل مهمة', contexts: ['image'] },
-      { id: MENU.savePage, title: '🔖 حفظ الصفحة / الرابط للمراجعة', contexts: ['page', 'link'] },
-      { id: MENU.summarize, title: '🧠 لخّصي الصفحة دي يا آية', contexts: ['page'] },
-    ];
-    for (const item of items) {
-      chrome.contextMenus.create({ ...item, parentId: ROOT });
+/** Resolves once every previous menu is gone, so no id can be created twice. */
+function clearContextMenus(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    try {
+      chrome.contextMenus.removeAll(() => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    } catch {
+      resolve();
     }
   });
 }
 
+/**
+ * Rebuilds the menu tree. `removeAll` is awaited first and every `create`
+ * swallows `runtime.lastError`, so a worker that restarts (or a settings
+ * change racing a startup) can never log duplicate-id errors.
+ */
+async function registerContextMenus(): Promise<void> {
+  await clearContextMenus();
+
+  const create = (properties: Record<string, unknown>) => {
+    try {
+      chrome.contextMenus.create(properties, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      /* menu API unavailable */
+    }
+  };
+
+  create({
+    id: ROOT,
+    title: '__AYAtodoist · آية',
+    contexts: ['selection', 'image', 'page', 'link'],
+  });
+
+  const items: Array<{ id: string; title: string; contexts: string[] }> = [
+    { id: MENU.addTask, title: '➕ إضافة كمهمة في النوتبوك', contexts: ['selection'] },
+    { id: MENU.note, title: '📝 حفظ كملاحظة / مرجع', contexts: ['selection'] },
+    { id: MENU.checklist, title: '☑️ تحويل إلى قائمة تشيك بوكس', contexts: ['selection'] },
+    { id: MENU.ask, title: '✨ اسألي / عالجي النص مع آية', contexts: ['selection'] },
+    { id: MENU.imageAnalyze, title: '🖼️ تحليل الصورة واستخراج مهام مع آية', contexts: ['image'] },
+    { id: MENU.imageTask, title: '📌 حفظ الصورة داخل مهمة', contexts: ['image'] },
+    { id: MENU.savePage, title: '🔖 حفظ الصفحة / الرابط للمراجعة', contexts: ['page', 'link'] },
+    { id: MENU.summarize, title: '🧠 لخّصي الصفحة دي يا آية', contexts: ['page'] },
+  ];
+  for (const item of items) create({ ...item, parentId: ROOT });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
-  buildContextMenus();
+  configureSidePanel();
+  void registerContextMenus();
   void refreshBadge();
 });
 chrome.runtime.onStartup.addListener(() => {
-  buildContextMenus();
+  configureSidePanel();
+  void registerContextMenus();
   void refreshBadge();
 });
 
@@ -245,9 +290,9 @@ async function openAyaWithText(tabId: number | undefined, text: string, imageUrl
 async function openSidePanel() {
   try {
     const win = await new Promise<any>((resolve) => chrome.windows.getLastFocused({}, resolve));
-    chrome.sidePanel.open({ windowId: win?.id });
+    await chrome.sidePanel.open({ windowId: win?.id });
   } catch {
-    notify('افتحي اللوحة الجانبية من أيقونة الإضافة');
+    notify('افتحي اللوحة الجانبية من أيقونة الإضافة في شريط الأدوات');
   }
 }
 
@@ -572,7 +617,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: (val
   }
 
   if (msg.type === 'aya-settings-changed') {
-    buildContextMenus();
+    void registerContextMenus();
     sendResponse({ ok: true });
     return true;
   }
