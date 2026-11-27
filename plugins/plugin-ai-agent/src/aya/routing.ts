@@ -34,6 +34,34 @@ const VISION_HINT =
 /** Families known for large context windows even when `/models` omits the size. */
 const LONG_HINT = /(1m|1\.0m|128k|200k|256k|long|gemini|glm|deepseek|minimax|flash|kimi)/i;
 
+/**
+ * Media / utility models that must never be assigned a chat role. Google's own
+ * catalogue lists Lyria (music), Imagen (images), Veo (video), embeddings,
+ * AQA, transcription and TTS alongside real chat models.
+ */
+const NON_CHAT =
+  /(lyria|imagen|veo|embedding|aqa|transcribe|tts|robotics|text-to-speech|speech-to-text|image[-_ ]?generation|video[-_ ]?generation)/i;
+
+export function isChatModel(model: AyaModel): boolean {
+  return !NON_CHAT.test(`${model.modelId} ${model.label}`);
+}
+
+/** The Gemini families the live catalogue exposes for chat, per role. */
+const GEMINI_PREFERRED: Record<AyaRole, RegExp> = {
+  chat_deep: /gemini-(2\.5-pro|2\.5-flash|2\.0-flash|3[^\s]*(pro|flash))/i,
+  background_24_7: /gemini-(2\.5-flash|2\.0-flash|3[^\s]*flash)/i,
+  vision: /gemini-(2\.5-flash|2\.5-pro|2\.0-flash|3[^\s]*(pro|flash))/i,
+  memory_summarizer: /gemini-(2\.5-flash|2\.0-flash|3[^\s]*flash)/i,
+};
+
+/** Reasoning leans harder on Gemini because it is the configured chat family. */
+const GEMINI_BONUS: Record<AyaRole, number> = {
+  chat_deep: 4,
+  background_24_7: 2.5,
+  vision: 2.5,
+  memory_summarizer: 2.5,
+};
+
 function clamp(value: number, min = 1, max = 10): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -97,12 +125,16 @@ const WEIGHTS: Record<AyaRole, { strength: number; speed: number; vision: number
 
 function roleScore(role: AyaRole, features: Features): number {
   const weights = WEIGHTS[role];
+  // A small, explicit preference for the Gemini chat families the user relies
+  // on. It breaks near-ties without overriding a genuinely stronger model.
+  const geminiBonus = GEMINI_PREFERRED[role].test(features.id) ? GEMINI_BONUS[role] : 0;
   return (
     weights.strength * features.strength +
     weights.speed * features.speed +
     weights.vision * features.vision +
     weights.long * features.longContext +
-    features.availability
+    features.availability +
+    geminiBonus
   );
 }
 
@@ -120,7 +152,9 @@ const ROLE_ORDER: AyaRole[] = ['chat_deep', 'background_24_7', 'vision', 'memory
  * needs a capability (a vision model for `vision`) may reuse it cheaply.
  */
 export function suggestRouting(models: AyaModel[]): RoutingSuggestion {
-  const enabled = models.filter((model) => model.enabled);
+  // Only chat-capable models participate: music/image/video/embeddings/audio
+  // models would otherwise win a role and break the first real turn.
+  const enabled = models.filter((model) => model.enabled && isChatModel(model));
   const reasons: Record<AyaRole, string> = {
     chat_deep: 'لا يوجد نموذج',
     background_24_7: 'لا يوجد نموذج',

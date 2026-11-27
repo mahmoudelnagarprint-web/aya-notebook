@@ -67,6 +67,37 @@ export function captureVisibleTab(): Promise<string | null> {
   });
 }
 
+/**
+ * Side panel → background. The worker owns `captureVisibleTab` and the upload,
+ * so the side panel only receives the finished URLs and preview.
+ */
+export function captureVisibleTabViaBackground(): Promise<{ id?: string; url: string; dataUrl: string } | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'CAPTURE_VISIBLE_TAB' }, (response: any) => {
+        if (chrome.runtime?.lastError) resolve(null);
+        else resolve(response?.ok && response.url && response.dataUrl ? response : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+/** Side panel → background. Extracts title/url/text (≤5000 chars) via scripting. */
+export function readActivePageViaBackground(): Promise<{ title: string; url: string; text: string } | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'READ_ACTIVE_PAGE' }, (response: any) => {
+        if (chrome.runtime?.lastError) resolve(null);
+        else resolve(response?.ok && response.text ? response : null);
+      });
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
 export function openWebApp(hash = ''): void {
   chrome.tabs.create({ url: `http://127.0.0.1:5173/${hash}` });
 }

@@ -1,5 +1,5 @@
 import type { Kernel } from '@ayatodoist/core-kernel';
-import type { AyaModel } from '@ayatodoist/shared-types';
+import type { AyaModel, AyaSettings } from '@ayatodoist/shared-types';
 import type { SqliteAyaStore } from '@ayatodoist/database';
 import { cleanApiKey, fetchProviderModels, normalizeBaseUrl, probeModel, redactSecret } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 
@@ -17,10 +17,14 @@ function newId(prefix: string): string {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+const HEALTH_CONCURRENCY = 4;
+const HEALTH_TICK_MS = 60_000;
+
 export class AyaService {
   private readonly kernel: Kernel;
   private readonly adapter: SqliteAyaStore;
   private readonly fetchImpl?: typeof fetch;
+  private healthTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: AyaServiceOpts) {
     this.kernel = opts.kernel;
@@ -134,12 +138,7 @@ export class AyaService {
     this.adapter.deleteModel(id);
   }
 
-  async testModel(id: string): Promise<any> {
-    const model = this.adapter.listModels().find((entry) => entry.id === id);
-    if (!model) throw new Error(`Unknown model: ${id}`);
-    const provider = this.adapter.listProviders().find((entry) => entry.id === model.providerId);
-    if (!provider) throw new Error(`Unknown provider for model: ${model.providerId}`);
-
+  private async probeAndSave(provider: any, model: AyaModel): Promise<AyaModel> {
     const result = await probeModel({
       baseUrl: provider.baseUrl,
       apiKey: provider.apiKey ?? '',
@@ -147,14 +146,120 @@ export class AyaService {
       fetchImpl: this.fetchImpl,
     });
 
-    const next: AyaModel = {
+    return this.adapter.saveModel({
       ...model,
       status: result.ok ? 'ok' : 'failed',
       latencyMs: result.latencyMs,
       lastTestedAt: new Date().toISOString(),
+      // A model that passed is usable again (auto-reactivation); a model that
+      // failed is taken out of the failover pool until a later probe recovers it.
+      enabled: result.ok,
       lastError: result.error ? redactSecret(result.error, provider.apiKey ?? '').slice(0, 200) : null,
+    });
+  }
+
+  async testModel(id: string): Promise<any> {
+    const model = this.adapter.listModels().find((entry) => entry.id === id);
+    if (!model) throw new Error(`Unknown model: ${id}`);
+    const provider = this.adapter.listProviders().find((entry) => entry.id === model.providerId);
+    if (!provider) throw new Error(`Unknown provider for model: ${model.providerId}`);
+    return this.probeAndSave(provider, model);
+  }
+
+  /** Probes every model of one provider in controlled batches of 4. */
+  async testAllModels(providerId: string): Promise<{ providerId: string; models: AyaModel[]; tested: number; ok: number; failed: number }> {
+    const provider = this.adapter.listProviders().find((entry) => entry.id === providerId);
+    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+    const rows = this.adapter.listModels(providerId);
+
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < rows.length) {
+        const index = cursor;
+        cursor += 1;
+        await this.probeAndSave(provider, rows[index]!);
+      }
     };
-    return this.adapter.saveModel(next);
+    await Promise.all(Array.from({ length: Math.min(HEALTH_CONCURRENCY, rows.length) }, worker));
+
+    const models = this.adapter.listModels(providerId);
+    return {
+      providerId,
+      models,
+      tested: rows.length,
+      ok: models.filter((model) => model.status === 'ok').length,
+      failed: models.filter((model) => model.status === 'failed').length,
+    };
+  }
+
+  /**
+   * Re-probes the whole catalogue (failed / disabled rows first) and turns any
+   * model that answers again straight back on.
+   */
+  async runHealthCheck(): Promise<{ checked: number; ok: number; failed: number; reEnabled: number; lastCheckAt: string }> {
+    const providers = this.adapter.listProviders();
+    const byId = new Map(providers.map((provider) => [provider.id, provider]));
+    const all = this.adapter.listModels();
+    const rows = all
+      .filter((model) => byId.has(model.providerId))
+      .sort((a, b) => {
+        const rank = (model: AyaModel) => (model.status === 'failed' || model.enabled === false ? 0 : 1);
+        return rank(a) - rank(b) || a.priority - b.priority;
+      });
+
+    let cursor = 0;
+    let reEnabled = 0;
+    const worker = async () => {
+      while (cursor < rows.length) {
+        const index = cursor;
+        cursor += 1;
+        const model = rows[index]!;
+        const wasDisabled = model.enabled === false || model.status === 'failed';
+        const saved = await this.probeAndSave(byId.get(model.providerId)!, model);
+        if (saved.status === 'ok' && wasDisabled) reEnabled += 1;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(HEALTH_CONCURRENCY, rows.length) }, worker));
+
+    const current = (this.adapter.getSettings() ?? {}) as Partial<AyaSettings>;
+    const lastCheckAt = new Date().toISOString();
+    this.adapter.saveSettings({ ...current, healthCheckLastAt: lastCheckAt, updatedAt: lastCheckAt });
+
+    const models = this.adapter.listModels();
+    return {
+      checked: rows.length,
+      ok: models.filter((model) => model.status === 'ok').length,
+      failed: models.filter((model) => model.status === 'failed').length,
+      reEnabled,
+      lastCheckAt,
+    };
+  }
+
+  /**
+   * Background loop: every minute, run a health check when the configured
+   * interval has elapsed. `unref` keeps the timer from holding the process open.
+   */
+  startHealthChecks(): void {
+    this.stopHealthChecks();
+    const tick = async () => {
+      try {
+        const settings = (this.adapter.getSettings() ?? {}) as Partial<AyaSettings>;
+        if (settings.healthCheckEnabled === false) return;
+        const minutes = Number(settings.healthCheckMinutes) || 15;
+        const last = settings.healthCheckLastAt ? Date.parse(String(settings.healthCheckLastAt)) : 0;
+        if (Number.isFinite(last) && last > 0 && Date.now() - last < minutes * 60_000) return;
+        await this.runHealthCheck();
+      } catch {
+        /* a background probe must never crash the server */
+      }
+    };
+    this.healthTimer = setInterval(() => void tick(), HEALTH_TICK_MS);
+    (this.healthTimer as unknown as { unref?: () => void })?.unref?.();
+  }
+
+  stopHealthChecks(): void {
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthTimer = null;
   }
 
   /**

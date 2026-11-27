@@ -187,6 +187,18 @@ export const ayaApi = {
     request<{ model: AyaModel }>(`/api/aya/models/${encodeURIComponent(id)}`, { method: 'PATCH', body: patch }),
   deleteModel: (id: string) => request<{ ok: boolean }>(`/api/aya/models/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   testModel: (id: string) => request<{ model: AyaModel }>(`/api/aya/models/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  testAllModels: (providerId: string) =>
+    request<{ providerId: string; models: AyaModel[]; tested: number; ok: number; failed: number }>(
+      `/api/aya/providers/${encodeURIComponent(providerId)}/test-all`,
+      { method: 'POST' },
+    ),
+  healthCheckStatus: () =>
+    request<{ enabled: boolean; minutes: number; lastCheckAt: string | null }>('/api/aya/health-check'),
+  runHealthCheck: () =>
+    request<{ checked: number; ok: number; failed: number; reEnabled: number; lastCheckAt: string }>(
+      '/api/aya/health-check/run',
+      { method: 'POST' },
+    ),
 
   setRouting: (patch: Partial<AyaRouting>) => request<{ routing: AyaRouting }>('/api/aya/routing', { method: 'PUT', body: patch }),
   smartRouting: () => request<{ routing: AyaRouting; reason: Record<AyaRole, string> }>('/api/aya/routing/auto', { method: 'POST' }),

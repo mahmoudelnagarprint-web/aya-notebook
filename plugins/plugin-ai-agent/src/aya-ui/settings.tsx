@@ -193,6 +193,9 @@ export function AyaSettingsPanel() {
   const [newMemory, setNewMemory] = useState('');
   const [newCategory, setNewCategory] = useState<AyaMemoryCategory>('preferences');
   const [channelDraft, setChannelDraft] = useState<Record<string, string>>({});
+  const [testingAll, setTestingAll] = useState<Record<string, boolean>>({});
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [healthNote, setHealthNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -234,6 +237,42 @@ export function AyaSettingsPanel() {
       setError(message(cause));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const testAllModels = async (providerId: string) => {
+    setTestingAll((current) => ({ ...current, [providerId]: true }));
+    try {
+      const result = await ayaApi.testAllModels(providerId);
+      setHealthNote(
+        language === 'ar'
+          ? `تم اختبار ${result.tested} موديل — ${result.ok} سليم · ${result.failed} فاشل`
+          : `Tested ${result.tested} models — ${result.ok} ok · ${result.failed} failed`,
+      );
+      setError(null);
+      await load();
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setTestingAll((current) => ({ ...current, [providerId]: false }));
+    }
+  };
+
+  const runHealthCheck = async () => {
+    setHealthBusy(true);
+    try {
+      const result = await ayaApi.runHealthCheck();
+      setHealthNote(
+        language === 'ar'
+          ? `فُحص ${result.checked} موديل — ${result.ok} سليم${result.reEnabled ? ` · أُعيد تنشيط ${result.reEnabled}` : ''}`
+          : `Checked ${result.checked} models — ${result.ok} ok${result.reEnabled ? ` · re-enabled ${result.reEnabled}` : ''}`,
+      );
+      setError(null);
+      await load();
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setHealthBusy(false);
     }
   };
 
@@ -322,6 +361,23 @@ export function AyaSettingsPanel() {
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
+                    disabled={testingAll[provider.id] || provider.models.length === 0}
+                    onClick={() => void testAllModels(provider.id)}
+                    className="inline-flex items-center gap-1 rounded-[6px] border border-[#1e78ff] px-2 py-1 text-[10.5px] font-bold text-[#1e78ff] hover:bg-blue-50 disabled:opacity-50 dark:hover:bg-blue-500/10"
+                  >
+                    {testingAll[provider.id] ? (
+                      <>
+                        <span className="inline-block h-2.5 w-2.5 animate-spin rounded-full border border-[#1e78ff] border-t-transparent" />
+                        {language === 'ar' ? 'جارٍ الاختبار…' : 'Testing…'}
+                      </>
+                    ) : language === 'ar' ? (
+                      'اختبار كل الموديلات'
+                    ) : (
+                      'Test all models'
+                    )}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void ayaApi.fetchModels(provider.id).then(() => load()).catch((cause) => setError(message(cause)))}
                     className="rounded-[6px] border border-[#e2e8f0] px-2 py-1 text-[10.5px] font-semibold text-slate-600 hover:border-[#1e78ff] hover:text-[#1e78ff] dark:border-slate-700 dark:text-slate-300"
                   >
@@ -352,6 +408,43 @@ export function AyaSettingsPanel() {
 
           <ProviderForm onCreated={() => void load()} onError={setError} />
         </div>
+      </Block>
+
+      <Block
+        title={language === 'ar' ? 'الفحص الدوري وإعادة التنشيط التلقائي' : 'Periodic health check & auto-reactivation'}
+        subtitle={language === 'ar' ? 'يعيد اختبار الموديلات الفاشلة ويشغّلها أول ما ترجع' : 'Re-probes failed models and turns them back on when they recover'}
+        icon="refresh"
+        action={
+          <Button variant="primary" icon="refresh" disabled={healthBusy} onClick={() => void runHealthCheck()}>
+            {healthBusy ? (language === 'ar' ? 'جارٍ الفحص…' : 'Checking…') : language === 'ar' ? 'فحص الآن' : 'Check now'}
+          </Button>
+        }
+      >
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 rounded-[8px] bg-slate-50 px-2.5 py-1.5 text-[11.5px] font-semibold text-slate-600 dark:bg-slate-800/60 dark:text-slate-300">
+            <Toggle
+              checked={settings?.healthCheckEnabled ?? true}
+              label="health-check"
+              onChange={(value) => void saveSettings({ healthCheckEnabled: value })}
+            />
+            {language === 'ar' ? 'مفعّل تلقائياً' : 'Auto enabled'}
+          </label>
+          <Select
+            value={String(settings?.healthCheckMinutes ?? 15)}
+            onChange={(event) => void saveSettings({ healthCheckMinutes: Number(event.target.value) })}
+            className="h-8 w-36"
+            aria-label="health check interval"
+          >
+            <option value="15">{language === 'ar' ? 'كل 15 دقيقة' : 'Every 15 min'}</option>
+            <option value="30">{language === 'ar' ? 'كل 30 دقيقة' : 'Every 30 min'}</option>
+            <option value="60">{language === 'ar' ? 'كل ساعة' : 'Every hour'}</option>
+          </Select>
+          <span className="text-[10.5px] text-slate-400">
+            {language === 'ar' ? 'آخر فحص: ' : 'Last check: '}
+            {settings?.healthCheckLastAt ? new Date(settings.healthCheckLastAt).toLocaleString(language === 'ar' ? 'ar-EG' : 'en-GB') : language === 'ar' ? 'لم يحدث بعد' : 'never'}
+          </span>
+        </div>
+        {healthNote ? <p className="mt-2 text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">{healthNote}</p> : null}
       </Block>
 
       <Block title={language === 'ar' ? 'التوزيع التلقائي بأربعة أدوار' : 'Smart 4-role routing'} subtitle={language === 'ar' ? 'لكل دور نموذجه المناسب' : 'One model per role'} icon="board">

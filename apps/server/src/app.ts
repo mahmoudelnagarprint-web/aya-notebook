@@ -49,7 +49,7 @@ export function createServerApp(kernel: Kernel, ayaStore?: SqliteAyaStore) {
   // server passes its file-backed store so every route shares one database.
   const store = ayaStore ?? new SqliteAyaStore(':memory:');
   const ayaService = new AyaService({ kernel, adapter: store });
-  void ayaService.init();
+  void ayaService.init().then(() => ayaService.startHealthChecks());
 
   // CORS for every route, including the preflight itself.
   app.use('*', async (c, next) => {

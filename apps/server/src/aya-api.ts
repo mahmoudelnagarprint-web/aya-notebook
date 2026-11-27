@@ -237,6 +237,25 @@ export function createAyaApi({ kernel, store, service }: AyaApiDeps) {
     return c.json({ model });
   });
 
+  /** Batched probe of every model on a provider (concurrency 4). */
+  app.post('/providers/:id/test-all', async (c) => {
+    const result = await service.testAllModels(c.req.param('id'));
+    return c.json(result);
+  });
+
+  /* ------------------------------------------------------- health checks */
+
+  app.get('/health-check', (c) => {
+    const settings = readSettings(store);
+    return c.json({
+      enabled: settings.healthCheckEnabled,
+      minutes: settings.healthCheckMinutes,
+      lastCheckAt: settings.healthCheckLastAt,
+    });
+  });
+
+  app.post('/health-check/run', async (c) => c.json(await service.runHealthCheck()));
+
   /* ----------------------------------------------------- routing/settings */
 
   const saveRouting = async (c: any) => {
@@ -278,6 +297,8 @@ export function createAyaApi({ kernel, store, service }: AyaApiDeps) {
       ...(typeof body.autonomy === 'string' ? { autonomy: body.autonomy } : {}),
       ...(typeof body.daemonEnabled === 'boolean' ? { daemonEnabled: body.daemonEnabled } : {}),
       ...(Number.isFinite(Number(body.heartbeatMinutes)) ? { heartbeatMinutes: Number(body.heartbeatMinutes) } : {}),
+      ...(typeof body.healthCheckEnabled === 'boolean' ? { healthCheckEnabled: body.healthCheckEnabled } : {}),
+      ...(Number.isFinite(Number(body.healthCheckMinutes)) ? { healthCheckMinutes: Math.max(5, Number(body.healthCheckMinutes)) } : {}),
       ...(Array.isArray(body.disabledTools) ? { disabledTools: body.disabledTools.map(String) } : {}),
     } as AyaSettings;
     const settings = { ...(store.saveSettings(next) as AyaSettings), updatedAt: now() };

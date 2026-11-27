@@ -416,6 +416,92 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: (val
     return true;
   }
 
+  /**
+   * One brain click = open, a second = close. Chrome has no `sidePanel.close`,
+   * so an already-open panel is handed the `CLOSE_SIDE_PANEL` message which the
+   * content script uses to dismiss the floating bar.
+   */
+  if (msg.type === 'TOGGLE_SIDE_PANEL') {
+    void (async () => {
+      try {
+        const stored = (await chrome.storage.local.get(['aya:sidePanelOpen'])) as Record<string, unknown>;
+        const open = Boolean(stored['aya:sidePanelOpen']);
+        if (open) {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.id) {
+            try {
+              chrome.tabs.sendMessage(tab.id, { type: 'CLOSE_SIDE_PANEL' }, () => void chrome.runtime?.lastError);
+            } catch {
+              /* no content script */
+            }
+          }
+          await chrome.storage.local.set({ 'aya:sidePanelOpen': false });
+          sendResponse({ ok: true, open: false });
+        } else {
+          await openSidePanel();
+          await chrome.storage.local.set({ 'aya:sidePanelOpen': true });
+          sendResponse({ ok: true, open: true });
+        }
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  /** Side panel → background: capture the visible tab, upload it, return both URLs. */
+  if (msg.type === 'CAPTURE_VISIBLE_TAB') {
+    void (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          chrome.tabs.captureVisibleTab(tab?.windowId, { format: 'png' }, (url: string) => {
+            if (chrome.runtime?.lastError) reject(new Error(chrome.runtime.lastError.message ?? 'capture failed'));
+            else resolve(url);
+          });
+        });
+        const blob = await (await fetch(dataUrl)).blob();
+        const file = new File([blob], 'screenshot.png', { type: 'image/png' });
+        const upload = await ayaServer.upload(file, 'screenshot.png');
+        sendResponse({ ok: true, id: upload.filename, url: upload.absoluteUrl, dataUrl });
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
+  /** Side panel → background: extract { title, url, text } from the active tab. */
+  if (msg.type === 'READ_ACTIVE_PAGE') {
+    void (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id) throw new Error('لا توجد صفحة نشطة');
+        const results = await new Promise<any[]>((resolve, reject) => {
+          chrome.scripting.executeScript(
+            {
+              target: { tabId: tab.id as number },
+              func: () => {
+                const text = String(document.body?.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 5000);
+                return { title: document.title, url: location.href, text };
+              },
+            },
+            (rows: any[]) => {
+              if (chrome.runtime?.lastError) reject(new Error(chrome.runtime.lastError.message ?? 'read failed'));
+              else resolve(rows ?? []);
+            },
+          );
+        });
+        const page = results?.[0]?.result;
+        if (!page?.text) throw new Error('تعذر قراءة نص هذه الصفحة');
+        sendResponse({ ok: true, title: page.title, url: page.url, text: page.text });
+      } catch (err) {
+        sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === 'aya-selection-action') {
     void (async () => {
       const kind = msg.kind;

@@ -64,6 +64,33 @@ export function authHeaders(apiKey: string | null | undefined): Record<string, s
   return key ? { authorization: `Bearer ${key}` } : {};
 }
 
+/** Google's native Gemini API lives on this host (with or without `/openai`). */
+export function isGoogleGenerative(baseUrl: string | null | undefined): boolean {
+  return /generativelanguage\.googleapis\.com/i.test(String(baseUrl ?? ''));
+}
+
+/**
+ * Native Gemini root: `…/v1beta/openai` → `…/v1beta`, `…/v1` stays `…/v1`.
+ * `:generateContent` and `/models` both hang off this root.
+ */
+export function googleApiRoot(rawBaseUrl: string): string {
+  return normalizeBaseUrl(rawBaseUrl).replace(/\/openai\/?$/i, '');
+}
+
+/**
+ * Per-provider auth headers.
+ *
+ * Google's native endpoint rejects `Authorization: Bearer <key>` with
+ * `401 Expected OAuth 2 access token`; it only accepts `x-goog-api-key`. Every
+ * other provider keeps the OpenAI-compatible Bearer header.
+ */
+export function providerAuthHeaders(baseUrl: string | null | undefined, apiKey: string | null | undefined): Record<string, string> {
+  const key = cleanApiKey(apiKey);
+  if (!key) return {};
+  if (isGoogleGenerative(baseUrl)) return { 'x-goog-api-key': key };
+  return { authorization: `Bearer ${key}` };
+}
+
 /** Turns an OpenAI-style error body into a short, human-readable diagnostic. */
 export function describeProviderFailure(status: number, bodyText: string): string {
   let detail = '';
@@ -145,12 +172,14 @@ export async function fetchProviderModels(options: FetchModelsOptions): Promise<
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   if (!baseUrl) throw new AyaProviderError('Base URL is required', 0, false);
   const fetchImpl = options.fetchImpl ?? fetch;
+  const google = isGoogleGenerative(baseUrl);
+  const endpoint = google ? `${googleApiRoot(baseUrl)}/models` : `${baseUrl}/models`;
   const { signal, release } = scopedTimeout(options.timeoutMs ?? 20_000);
   const started = performance.now();
   try {
-    const response = await fetchImpl(`${baseUrl}/models`, {
+    const response = await fetchImpl(endpoint, {
       method: 'GET',
-      headers: { accept: 'application/json', ...authHeaders(options.apiKey) },
+      headers: { accept: 'application/json', ...providerAuthHeaders(baseUrl, options.apiKey) },
       signal,
     });
     const text = await response.text();
@@ -165,22 +194,40 @@ export async function fetchProviderModels(options: FetchModelsOptions): Promise<
     type RawModel = {
       id?: string;
       name?: string;
+      displayName?: string;
       context_length?: number;
       context_window?: number;
+      inputTokenLimit?: number;
+      supportedGenerationMethods?: string[];
       architecture?: { input_modalities?: string[] };
     };
     const payload = JSON.parse(text) as { data?: RawModel[]; models?: RawModel[] };
-    const raw: RawModel[] = payload.data ?? payload.models ?? [];
     const models: FetchedModel[] = [];
-    for (const entry of raw) {
-      const modelId = entry.id ?? entry.name;
-      if (!modelId) continue;
-      models.push({
-        modelId,
-        label: entry.name ?? modelId,
-        contextWindow: entry.context_length ?? entry.context_window ?? estimateContextWindow(modelId),
-        vision: detectVision(modelId) || (entry.architecture?.input_modalities?.includes('image') ?? false),
-      });
+    if (google) {
+      // Native shape: { models: [{ name: 'models/gemini-2.5-flash', … }] }.
+      for (const entry of payload.models ?? []) {
+        const modelId = String(entry.name ?? '').replace(/^models\//, '');
+        if (!modelId) continue;
+        const methods = entry.supportedGenerationMethods;
+        if (Array.isArray(methods) && !methods.includes('generateContent')) continue;
+        models.push({
+          modelId,
+          label: entry.displayName ?? modelId,
+          contextWindow: entry.inputTokenLimit ?? estimateContextWindow(modelId),
+          vision: detectVision(modelId),
+        });
+      }
+    } else {
+      for (const entry of payload.data ?? payload.models ?? []) {
+        const modelId = entry.id ?? entry.name;
+        if (!modelId) continue;
+        models.push({
+          modelId,
+          label: entry.name ?? modelId,
+          contextWindow: entry.context_length ?? entry.context_window ?? estimateContextWindow(modelId),
+          vision: detectVision(modelId) || (entry.architecture?.input_modalities?.includes('image') ?? false),
+        });
+      }
     }
     models.sort((a, b) => a.modelId.localeCompare(b.modelId));
     return { models, latencyMs: Math.round(performance.now() - started) };
@@ -199,18 +246,21 @@ export async function probeModel(options: {
 }): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
   const baseUrl = normalizeBaseUrl(options.baseUrl);
   const fetchImpl = options.fetchImpl ?? fetch;
+  const google = isGoogleGenerative(baseUrl);
+  const modelId = String(options.modelId ?? '').replace(/^models\//, '');
+  const url = google
+    ? `${googleApiRoot(baseUrl)}/models/${modelId}:generateContent`
+    : `${baseUrl}/chat/completions`;
+  const body = google
+    ? { contents: [{ role: 'user', parts: [{ text: 'ping' }] }], generationConfig: { maxOutputTokens: 16 } }
+    : { model: modelId, messages: [{ role: 'user', content: 'ping' }], max_tokens: 16, stream: false };
   const { signal, release } = scopedTimeout(options.timeoutMs ?? 25_000);
   const started = performance.now();
   try {
-    const response = await fetchImpl(`${baseUrl}/chat/completions`, {
+    const response = await fetchImpl(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json', ...authHeaders(options.apiKey) },
-      body: JSON.stringify({
-        model: options.modelId,
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 16,
-        stream: false,
-      }),
+      headers: { 'content-type': 'application/json', accept: 'application/json', ...providerAuthHeaders(baseUrl, options.apiKey) },
+      body: JSON.stringify(body),
       signal,
     });
     const text = await response.text();

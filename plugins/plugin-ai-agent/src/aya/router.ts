@@ -1,4 +1,4 @@
-import { normalizeBaseUrl, authHeaders, classifyFailure } from './providers';
+import { normalizeBaseUrl, providerAuthHeaders, isGoogleGenerative, googleApiRoot, classifyFailure } from './providers';
 
 /**
  * The failover router. One request, an ordered pool of models, and a per-attempt
@@ -94,15 +94,14 @@ export class AyaModelRouter {
       if (!provider) continue;
 
       const baseUrl = normalizeBaseUrl(provider.baseUrl);
-      const nativeGoogle = /generativelanguage\.googleapis\.com/.test(baseUrl);
+      const nativeGoogle = isGoogleGenerative(baseUrl);
       const modelId = String(model.modelId ?? '').replace(/^models\//, '');
 
       let url: string;
       let body: Record<string, unknown>;
 
       if (nativeGoogle) {
-        const apiRoot = baseUrl.replace(/\/openai\/?$/, '');
-        url = `${apiRoot}/models/${modelId}:generateContent`;
+        url = `${googleApiRoot(baseUrl)}/models/${modelId}:generateContent`;
         body = {
           contents: messages
             .filter((message) => message.role !== 'system')
@@ -145,7 +144,9 @@ export class AyaModelRouter {
       try {
         const response = await fetchImpl(url, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', accept: 'application/json', ...authHeaders(provider.apiKey ?? '') },
+          // Native Gemini needs `x-goog-api-key`; a Bearer header there is
+          // rejected with `401 Expected OAuth 2 access token`.
+          headers: { 'content-type': 'application/json', accept: 'application/json', ...providerAuthHeaders(baseUrl, provider.apiKey ?? '') },
           body: JSON.stringify(body),
         });
         const text = await response.text();

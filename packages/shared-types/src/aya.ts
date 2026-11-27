@@ -166,6 +166,10 @@ export interface AyaSettings {
   autonomy: AyaAutonomy;
   daemonEnabled: boolean;
   heartbeatMinutes: number;
+  /** Periodic model health check + automatic re-activation of recovered models. */
+  healthCheckEnabled: boolean;
+  healthCheckMinutes: number;
+  healthCheckLastAt: string | null;
   /** Command names Aya may never call. */
   disabledTools: string[];
   updatedAt: string;
@@ -227,6 +231,9 @@ export const DEFAULT_AYA_SETTINGS: AyaSettings = {
   autonomy: 'confirm_delete',
   daemonEnabled: true,
   heartbeatMinutes: 20,
+  healthCheckEnabled: true,
+  healthCheckMinutes: 15,
+  healthCheckLastAt: null,
   disabledTools: [],
   updatedAt: new Date(0).toISOString(),
 };

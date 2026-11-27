@@ -1,6 +1,13 @@
 import { Database } from 'bun:sqlite';
 
-declare const Bun: { serve: (options: { port: number; hostname: string; fetch: (request: Request) => Response | Promise<Response> }) => unknown };
+declare const Bun: {
+  serve: (options: {
+    port: number;
+    hostname: string;
+    idleTimeout?: number;
+    fetch: (request: Request) => Response | Promise<Response>;
+  }) => unknown;
+};
 import { join } from 'node:path';
 import { Kernel, MemoryStore } from '@ayatodoist/core-kernel';
 import { tasksCorePlugin } from '@ayatodoist/plugin-tasks-core';
@@ -46,7 +53,9 @@ const requested = Number(process.env.PORT);
 const port = Number.isInteger(requested) && requested > 0 ? requested : 8787;
 
 if (import.meta.main) {
-  Bun.serve({ port, hostname: '127.0.0.1', fetch: app.fetch });
+  // Model probes can legitimately take longer than Bun's 10s default; without
+  // this the batched test / health-check POSTs would be aborted mid-probe.
+  Bun.serve({ port, hostname: '127.0.0.1', idleTimeout: 120, fetch: app.fetch });
   console.log(`[server] listening on http://127.0.0.1:${port}`);
 }
 

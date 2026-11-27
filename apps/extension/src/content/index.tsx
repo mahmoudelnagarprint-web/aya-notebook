@@ -121,6 +121,11 @@ async function boot() {
       sendResponse({ ok: true });
       return true;
     }
+    if (msg?.type === 'CLOSE_SIDE_PANEL') {
+      closeDrawer();
+      sendResponse({ ok: true });
+      return true;
+    }
     if (msg?.type === 'aya-open-drawer-with-text') {
       openDrawer(String(msg.text ?? ''), msg.imageUrl, msg.imagePreview);
       sendResponse({ ok: true });
@@ -219,17 +224,40 @@ function renderHandle() {
   if (!rootEl || handleEl) return;
   handleEl = document.createElement('div');
   handleEl.className = 'k-handle';
+  handleEl.setAttribute('role', 'button');
+  handleEl.setAttribute('tabindex', '0');
+  handleEl.setAttribute('aria-label', 'فتح / إغلاق بار آية');
+  handleEl.dataset.tip = 'فتح / إغلاق بار آية';
   handleEl.innerHTML = `
-    <div class="k-handle-grip"></div>
-    <div class="k-handle-label">آية</div>
-    <div class="k-handle-plus" title="مهمة سريعة">+</div>
+    <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
+      <defs>
+        <linearGradient id="k-brain-a" x1="6" y1="6" x2="42" y2="42" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#de4c4a" />
+          <stop offset=".55" stop-color="#8b5cf6" />
+          <stop offset="1" stop-color="#1e78ff" />
+        </linearGradient>
+        <linearGradient id="k-brain-b" x1="10" y1="10" x2="38" y2="38" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stop-color="#ff8a5b" />
+          <stop offset="1" stop-color="#c026d3" />
+        </linearGradient>
+      </defs>
+      <path fill="url(#k-brain-a)" d="M24 9c3.3-3 8.6-2.4 10.9 1.6 3.9.4 6.2 4.3 4.9 7.9 2.9 2.8 2.2 7.6-1.3 9.5.6 4.3-3.5 7.7-7.6 6.5-1.6 2.8-5.3 3.4-7.7 1.2-2.4 2.2-6.1 1.6-7.7-1.2-4.1 1.2-8.2-2.2-7.6-6.5-3.5-1.9-4.2-6.7-1.3-9.5-1.3-3.6 1-7.5 4.9-7.9C15.4 6.6 20.7 6 24 9Z" />
+      <path fill="url(#k-brain-b)" opacity=".92" d="M24 11.4c2.2 2.6 6.1 2.9 8.7.8 1.9 1.9 2 5 .2 7 1.5 2.4.7 5.6-1.8 7-1.1 2.4-4.2 3.2-6.3 1.6-2.1 1.6-5.2.8-6.3-1.6-2.5-1.4-3.3-4.6-1.8-7-1.8-2-1.7-5.1.2-7 2.6 2.1 6.5 1.8 8.7-.8Z" />
+      <path fill="none" stroke="#fff" stroke-linecap="round" stroke-width="1.7" opacity=".9" d="M24 13.5v19M24 20c-2.2 0-3.7-1-4.6-2.6M24 20c2.2 0 3.7-1 4.6-2.6M24 27c-2.2 0-3.7 1-4.6 2.6M24 27c2.2 0 3.7 1 4.6 2.6" />
+    </svg>
   `;
   rootEl.appendChild(handleEl);
 
-  const plus = handleEl.querySelector('.k-handle-plus') as HTMLElement;
-  plus.addEventListener('click', (event) => {
-    event.stopPropagation();
-    toggleQuickAdd();
+  // Right-click opens the full side panel; a plain click toggles the floating bar.
+  handleEl.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    void sendMessage({ type: 'TOGGLE_SIDE_PANEL' });
+  });
+  handleEl.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleDrawer();
+    }
   });
 
   let dragging = false;
@@ -251,7 +279,7 @@ function renderHandle() {
     if (!dragging || !handleEl) return;
     const delta = event.clientY - startY;
     if (Math.abs(delta) > 4) moved = true;
-    const top = Math.max(12, Math.min(window.innerHeight - 190, startTop + delta));
+    const top = Math.max(12, Math.min(window.innerHeight - 56, startTop + delta));
     handleEl.style.top = `${top}px`;
   });
 

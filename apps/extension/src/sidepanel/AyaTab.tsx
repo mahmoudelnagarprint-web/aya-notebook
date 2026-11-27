@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ayaServer, type AyaConfig, type ChatEvent, type ConversationRow } from '../lib/server';
-import { captureVisibleTab, dataUrlToFile, sendToActiveTab } from '../lib/browser';
+import { captureVisibleTabViaBackground, readActivePageViaBackground, sendToActiveTab } from '../lib/browser';
 import type { PendingPrompt } from '../lib/pending';
 
 interface Chip {
@@ -241,23 +241,26 @@ export default function AyaTab({ pending, onPendingConsumed, onActivity }: Props
   };
 
   const readPage = async () => {
-    const context = await sendToActiveTab<{ text: string; title: string; url: string }>({ type: 'aya-get-page-text' });
+    // Prefer the worker's scripting extraction; fall back to the content script
+    // when the page is a restricted URL where executeScript is blocked.
+    const viaWorker = await readActivePageViaBackground();
+    const context =
+      viaWorker ??
+      (await sendToActiveTab<{ text: string; title: string; url: string }>({ type: 'aya-get-page-text' }));
     if (!context?.text) {
       setNotice('تعذر قراءة هذه الصفحة (جرّب صفحة عادية بدل صفحة الإعدادات).');
       return;
     }
-    setPageContext(context);
-    setNotice(`📄 أُرفقت الصفحة (${context.text.length.toLocaleString('ar-EG')} حرف)`);
+    setPageContext({ title: context.title, url: context.url, text: context.text.slice(0, 5000) });
+    setNotice(`📄 أُرفقت الصفحة (${Math.min(context.text.length, 5000).toLocaleString('ar-EG')} حرف)`);
   };
 
   const screenshot = async () => {
     setUploading(true);
     try {
-      const dataUrl = await captureVisibleTab();
-      if (!dataUrl) throw new Error('لم أستطع التقاط الصفحة');
-      const file = await dataUrlToFile(dataUrl, 'screenshot.png');
-      const upload = await ayaServer.upload(file);
-      setAttachment({ kind: 'image', url: upload.absoluteUrl, name: 'لقطة الشاشة', preview: dataUrl });
+      const shot = await captureVisibleTabViaBackground();
+      if (!shot?.dataUrl) throw new Error('لم أستطع التقاط الصفحة');
+      setAttachment({ kind: 'image', url: shot.url, name: shot.id || 'لقطة الشاشة', preview: shot.dataUrl });
       setNotice('📸 أُرفقت لقطة الشاشة');
     } catch (err) {
       setNotice(`تعذر الالتقاط: ${err instanceof Error ? err.message : String(err)}`);
