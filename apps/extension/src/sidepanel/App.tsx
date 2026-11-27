@@ -1,146 +1,149 @@
 /**
- * Native Side Panel app.
- * Mirrors the same floating-drawer logic but docked inside Chrome/Edge's side panel.
+ * Full Aya side panel: Tasks & notes, streaming AI workspace, proactive inbox
+ * and settings/offline queue. Shares its data layer with the popup and the
+ * in-page drawer.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import './sidepanel.css';
 import { ayaServer } from '../lib/server';
+import { filterCounts, loadData, type KernelData } from '../lib/tasks';
+import { applyTheme, loadTheme, saveTheme, watchTheme, type Theme } from '../lib/theme';
+import { openWebApp } from '../lib/browser';
+import { takePendingPrompt, watchPendingPrompt, type PendingPrompt } from '../lib/pending';
+import TasksTab from './TasksTab';
+import AyaTab from './AyaTab';
+import InboxTab from './InboxTab';
+import SettingsTab from './SettingsTab';
+
+type TabKey = 'tasks' | 'aya' | 'inbox' | 'settings';
+
+const TABS: Array<{ key: TabKey; label: string; icon: string }> = [
+  { key: 'tasks', label: 'مهامي وملاحظاتي', icon: '📋' },
+  { key: 'aya', label: 'آية ✨', icon: '🤖' },
+  { key: 'inbox', label: 'رسائل آية', icon: '🔔' },
+  { key: 'settings', label: 'الإعدادات والطابور', icon: '⚙️' },
+];
 
 export default function SidePanel() {
-  const [config, setConfig] = useState<any>(null);
-  const [streaming, setStreaming] = useState(false);
-  const [streamText, setStreamText] = useState('');
-  const [chips, setChips] = useState<Array<{ name: string; state: 'running' | 'done' | 'fail' }>>([]);
-  const [modelId, setModelId] = useState('auto');
-  const composerRef = useRef<HTMLTextAreaElement>(null);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [tab, setTab] = useState<TabKey>('tasks');
+  const [theme, setTheme] = useState<Theme>('light');
+  const [online, setOnline] = useState<boolean | null>(null);
+  const [counts, setCounts] = useState({ all: 0, today: 0, inbox: 0, notes: 0, projects: 0 });
+  const [unread, setUnread] = useState(0);
+  const [pending, setPending] = useState<PendingPrompt | null>(null);
+  const [tick, setTick] = useState(0);
 
-  const send = async () => {
-    const text = composerRef.current?.value.trim();
-    if (!text && !pendingFile) return;
-    setStreaming(true);
-    setStreamText('⏳ جاري التفكير…');
-    setChips([]);
-    const payload: any = {
-      conversationId: null,
-      text,
-      language: 'ar',
-      modelId,
-      attachments: pendingFile ? [{ kind: 'image', file: pendingFile }] : [],
-    };
-    composerRef.current!.value = '';
-    setPendingFile(null);
+  const refresh = useCallback(async () => {
+    try {
+      const data: KernelData = await loadData();
+      const next = filterCounts(data);
+      setCounts(next);
+      setOnline(true);
+    } catch {
+      setOnline(false);
+    }
+    try {
+      const inbox = await ayaServer.inbox();
+      setUnread(inbox.items.filter((item) => (item.status ?? 'unread') === 'unread').length);
+    } catch {
+      /* keep the previous count */
+    }
+  }, []);
 
-    composerRef.current!.value = '';
-    setPendingFile(null);
+  useEffect(() => {
+    loadTheme().then((value) => {
+      setTheme(value);
+      applyTheme(value);
+    });
+    watchTheme((value) => {
+      setTheme(value);
+      applyTheme(value);
+    });
+    refresh();
+    const timer = window.setInterval(refresh, 60_000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
 
-    const stream = ayaServer.chatStream(payload);
-    const reader = stream.getReader();
-    setChips([]);
-    (async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const { event, data } = value;
-          if (event === 'delta' && data?.text) {
-            setStreamText((prev) => prev + data.text);
-          } else if (event === 'tool_start') {
-            setChips((prev) => [...prev, { name: data.name, state: 'running' }]);
-          } else if (event === 'tool_result') {
-            setChips((prev) => prev.map((c) => c.name === data.name ? { ...c, state: data.ok ? 'done' : 'fail' } : c));
-          } else if (event === 'done') {
-            setStreamText((prev) => prev + (data?.text || ''));
-          } else if (event === 'error') {
-            setStreamText(`خطأ: ${data?.message || 'غير متوقع'}`);
-          }
-        }
-      } catch (err) {
-        setStreamText(`اتصال فشل: ${err}`);
-      } finally {
-        setStreaming(false);
+  useEffect(() => {
+    takePendingPrompt().then((prompt) => {
+      if (prompt) {
+        setPending(prompt);
+        setTab('aya');
       }
-    })();
+    });
+    watchPendingPrompt((prompt) => {
+      setPending(prompt);
+      setTab('aya');
+    });
+  }, []);
+
+  const toggleTheme = () => {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    applyTheme(next);
+    saveTheme(next);
   };
 
-  const attachFile = (file: File) => setPendingFile(file);
+  const handleChanged = useCallback(() => {
+    setTick((value) => value + 1);
+    refresh();
+  }, [refresh]);
 
   return (
-    <div style={{ width: 420, maxWidth: '100vw', background: '#242424', color: '#fbfbfb', fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Tahoma, sans-serif', display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      {/* Header */}
-      <div style={{ padding: '10px 12px', borderBottom: '1px solid #323232', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 22, height: 22, borderRadius: 6, background: 'linear-gradient(135deg,#de4c4a,#8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 11 }}>آ</div>
+    <div className="sp-app">
+      <header className="sp-header">
+        <div className="sp-brand">
+          <div className="brand-mark">آ</div>
           <div>
-            <div style={{ fontSize: 13, fontWeight: 600 }}>بار آية · اللوحة الجانبية</div>
-            <div style={{ fontSize: 10, color: config?.baseUrl ? '#8b5cf6' : '#ff8a82' }}>
-              {config?.baseUrl || 'غير مضبوط'} {config?.token ? '· مع token' : ''}
+            <div className="brand-title">آية · __AYAtodoist</div>
+            <div className="brand-sub">
+              <span className={`dot ${online === false ? 'dot-red' : online ? 'dot-green' : 'dot-gray'}`} />
+              {online === false ? 'أوفلاين' : online ? 'متصل' : 'جارٍ الاتصال'}
+              {unread > 0 && <span>· {unread} رسالة جديدة</span>}
             </div>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 4 }}>
-          <span style={{ fontSize: 10, color: '#9a9a9a' }}>الموديل:</span>
-          <select
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-            style={{ background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 8, padding: '3px 6px', fontSize: 11 }}
+        <div className="sp-header-actions">
+          <button className="hdr-btn" title={theme === 'dark' ? 'الوضع الفاتح' : 'الوضع الداكن'} onClick={toggleTheme}>
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          <button className="hdr-btn" title="فتح تطبيق الويب" onClick={() => openWebApp()}>
+            ↗
+          </button>
+          <button className="hdr-btn" title="تحديث" onClick={handleChanged}>
+            ⟳
+          </button>
+        </div>
+      </header>
+
+      <nav className="sp-tabs">
+        {TABS.map((item) => (
+          <button
+            key={item.key}
+            className={`sp-tab ${tab === item.key ? 'active' : ''}`}
+            onClick={() => setTab(item.key)}
           >
-            <option value="auto">تلقائي</option>
-            <option value="models/gemini-3-flash-preview">Gemini Flash</option>
-            <option value="ddd/zai-org/GLM-5.3-Flash">GLM-5.3 Flash</option>
-          </select>
-        </div>
-      </div>
+            <span className="sp-tab-icon">{item.icon}</span>
+            <span>{item.label}</span>
+            {item.key === 'inbox' && unread > 0 && <span className="sp-tab-count">{unread > 99 ? '99+' : unread}</span>}
+            {item.key === 'tasks' && counts.today > 0 && <span className="sp-tab-count" style={{ background: 'var(--blue)' }}>{counts.today}</span>}
+          </button>
+        ))}
+      </nav>
 
-      {/* Stream area */}
-      <div style={{ padding: '10px 12px', flex: 1, overflow: 'auto', fontSize: 13, lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
-        {streamText || <span style={{ color: '#9a9a9a' }}>_bar docked,ready for Alt+A in any tab.</span>}
-      </div>
-
-      {/* Chips */}
-      {chips.length > 0 && (
-        <div style={{ padding: '0 12px 8px', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {chips.map((c) => (
-            <span key={c.name} style={{ padding: '2px 8px', borderRadius: 8, fontSize: 11, background: c.state === 'running' ? 'rgba(222,76,74,0.15)' : c.state === 'done' ? 'rgba(139,92,246,0.18)' : 'rgba(222,76,74,0.15)', border: '1px solid ' + (c.state === 'running' ? '#8b5cf6' : c.state === 'done' ? '#8b5cf6' : '#de4c4a'), color: c.state === 'running' ? '#8b5cf6' : c.state === 'done' ? '#c7b3ff' : '#ff8a82' }}>
-              {c.state === 'running' ? '⏳' : c.state === 'done' ? '✅' : '❌'} {c.name}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Composer */}
-      <div style={{ padding: '8px 12px 10px', borderTop: '1px solid #323232', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-        <div style={{ flex: 1, position: 'relative' }}>
-          <textarea
-            ref={composerRef}
-            placeholder="اكتبي رسالة لآية… (أو أرفعي صورة)"
-            style={{ width: '100%', background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 9, padding: '7px 9px', fontSize: 12, resize: 'none', minHeight: 40 }}
-            rows={2}
+      <main className="sp-main">
+        {tab === 'tasks' && <TasksTab refreshKey={tick} onChanged={handleChanged} counts={counts} />}
+        {tab === 'aya' && (
+          <AyaTab
+            pending={pending}
+            onPendingConsumed={() => setPending(null)}
+            onActivity={handleChanged}
           />
-        </div>
-        <button
-          style={streaming ? { opacity: .5 } : { background: '#de4c4a', color: '#fff', border: 'none', borderRadius: 10, padding: '7px 12px', fontSize: 12, fontWeight: 600, cursor: streaming ? 'not-allowed' : 'pointer' }}
-          onClick={send}
-          disabled={streaming}
-        >
-          {streaming ? 'جاري…' : 'إرسال'}
-        </button>
-        <button
-          style={{ background: '#3a3a3a', color: '#fbfbfb', border: 'none', borderRadius: 10, padding: '7px 9px', fontSize: 14, cursor: 'pointer' }}
-          onClick={() => {
-            const input = document.createElement('input');
-            input.type = 'file';
-            input.accept = 'image/png,image/jpeg,image/webp,image/gif';
-            input.click();
-            input.addEventListener('change', async () => {
-              const file = input.files?.[0];
-              if (file) attachFile(file);
-            });
-          }}
-        >
-          🖼️
-        </button>
-      </div>
+        )}
+        {tab === 'inbox' && <InboxTab refreshKey={tick} onChanged={handleChanged} />}
+        {tab === 'settings' && <SettingsTab onChanged={handleChanged} />}
+      </main>
     </div>
   );
 }

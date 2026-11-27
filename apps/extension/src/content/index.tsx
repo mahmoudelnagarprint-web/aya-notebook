@@ -1,639 +1,832 @@
 /**
- * Content script — mounted once per tab inside a Shadow DOM root so the host page
- * CSS can never leak in and our styles can never leak out. All real work (server
- * calls, context menus, alarms, queue) is delegated to the background worker via
- * `chrome.runtime` messages. This file owns the floating UI only.
+ * In-page content script.
+ *
+ * Everything lives inside a closed Shadow DOM so page CSS can never leak in:
+ * success toasts, the floating selection toolbar, the draggable edge handle, the
+ * Aya drawer (streaming via the background worker) and the quick-add modal.
+ * Server access is delegated to the background service worker.
  */
 
-import './main.css';
+import styles from './main.css?inline';
 import { extractPageText, pageContextBlock } from '../lib/helpers';
-import { ayaServer } from '../lib/server';
-import { setPendingImage, toggleQuickAdd } from './messages';
-import type {} from './messages';
+import { loadTheme, watchTheme, saveTheme, type Theme } from '../lib/theme';
 
-declare global {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  interface Window { ayaExtension?: any; }
+const HOST_ID = 'aya-shadow-host';
+
+interface Settings {
+  selectionPillEnabled?: boolean;
+  pageContextEnabled?: boolean;
+  pageContextTrim?: number;
+  handleSide?: 'right' | 'left' | 'hidden';
+  handleY?: number;
+  quickAddDefaultPriority?: number;
+  serverBaseUrl?: string;
 }
 
-// ---------- singletons ----------
-let hostEl: HTMLElement | null = null;
+interface ChatBubble {
+  role: 'user' | 'assistant';
+  text: string;
+  chips: Array<{ name: string; state: 'running' | 'done' | 'fail' }>;
+  error?: boolean;
+}
+
 let shadow: ShadowRoot | null = null;
+let rootEl: HTMLElement | null = null;
+let handleEl: HTMLElement | null = null;
+let toolbarEl: HTMLElement | null = null;
+let drawerEl: HTMLElement | null = null;
+let quickEl: HTMLElement | null = null;
+let toastHost: HTMLElement | null = null;
+
+let settings: Settings = {};
+let theme: Theme = 'light';
+let selectionText = '';
+let pageContext: { title: string; url: string; text: string } | null = null;
+let attachment: { url: string; preview?: string; name: string } | null = null;
+let conversationId = '';
+let streamPort: any = null;
+let streaming = false;
 let drawerOpen = false;
-let quickAddOpen = false;
-let pendingImage: File | null = null;
+let quickOpen = false;
+let batchId: string | null = null;
+let modelsLoaded = false;
 
-// ---------- mount ----------
-export function mountAyaExtension(container?: HTMLElement) {
-  const root = container ?? document.body;
-  if (document.getElementById('aya-shadow-host')) return;
+/* ------------------------------------------------------------------ boot */
+
+async function boot() {
+  if (document.getElementById(HOST_ID)) return;
+
+  try {
+    const stored = (await chrome.storage.local.get(['aya:settings'])) as Record<string, any>;
+    settings = stored['aya:settings'] ?? {};
+  } catch {
+    settings = {};
+  }
+  theme = await loadTheme();
+
   const host = document.createElement('div');
-  host.id = 'aya-shadow-host';
-  host.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
-  root.appendChild(host);
-  // Modal host: a fixed overlay that can appear above the page.
-  const overlay = document.createElement('div');
-  overlay.id = 'aya-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;display:none;';
-  root.appendChild(overlay);
-  hostEl = host;
+  host.id = HOST_ID;
+  host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
+  document.documentElement.appendChild(host);
+
   shadow = host.attachShadow({ mode: 'closed' });
-  shadow.innerHTML = `
-    <style>
-      /* Reset inside shadow so no page styles apply. */
-      :host { all: initial; display: block; }
-      .kaya-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.32); display: flex; align-items: flex-start; justify-content: flex-end; z-index: 2147483646; pointer-events: none; }
-      .kaya-host { position: relative; pointer-events: auto; }
-      /* Keep styles isolated: import main.css inside shadow too. */
-    </style>
-  `;
+  const style = document.createElement('style');
+  style.textContent = styles;
+  rootEl = document.createElement('div');
+  rootEl.className = 'kaya-root';
+  rootEl.dir = 'rtl';
+  rootEl.dataset.theme = theme;
+  rootEl.dataset.handle = settings.handleSide ?? 'right';
+  shadow.append(style, rootEl);
 
-  // Bring in the shared CSS inside the shadow so the UI looks right.
-  import('../content/main.css').then(() => {
-    // re-apply after CSS is loaded (no-op, but makes styles available).
-  });
+  toastHost = document.createElement('div');
+  toastHost.className = 'k-toast-host';
+  rootEl.appendChild(toastHost);
 
-  // Render the floating handle + quick-add overlay host.
-  renderHandle(shadow!);
-  renderOverlay(overlay, shadow!);
+  toolbarEl = document.createElement('div');
+  toolbarEl.className = 'k-toolbar';
+  toolbarEl.style.display = 'none';
+  rootEl.appendChild(toolbarEl);
+  renderToolbar();
 
-  // Wire hotkeys per tab.
-  window.addEventListener('keydown', (e) => {
-    if (e.isComposing) return;
-    const mod = e.altKey && !e.ctrlKey && !e.metaKey;
-    if ((e.key === 'a' || e.key === 'A') && mod && !isInsideInput()) {
-      e.preventDefault();
+  renderHandle();
+  applyHandle();
+
+  document.addEventListener('mouseup', scheduleSelectionCheck, true);
+  document.addEventListener('keyup', scheduleSelectionCheck, true);
+  document.addEventListener('mousedown', (event) => {
+    // Shadow-DOM clicks are retargeted to the host, so inspect the composed path.
+    if (!toolbarEl || !event.composedPath().includes(toolbarEl)) hideToolbar();
+  }, true);
+  window.addEventListener('scroll', hideToolbar, true);
+  window.addEventListener('resize', () => applyHandle(), true);
+
+  window.addEventListener('keydown', (event) => {
+    if (event.isComposing) return;
+    if (event.altKey && event.shiftKey && (event.key === 'a' || event.key === 'A')) {
+      event.preventDefault();
       toggleDrawer();
-    } else if ((e.key === 'q' || e.key === 'Q') && mod) {
-      e.preventDefault();
+    } else if (event.altKey && !event.shiftKey && (event.key === 'q' || event.key === 'Q')) {
+      event.preventDefault();
       toggleQuickAdd();
-    } else if (e.key === 'Escape') {
-      if (drawerOpen) closeDrawer();
-      else if (quickAddOpen) closeQuickAdd();
+    } else if (event.key === 'Escape') {
+      if (quickOpen) closeQuickAdd();
+      else if (drawerOpen) closeDrawer();
+    }
+  });
+
+  chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: (value?: any) => void) => {
+    if (msg?.type === 'aya-toggle-drawer') {
+      toggleDrawer();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg?.type === 'aya-open-drawer-with-text') {
+      openDrawer(String(msg.text ?? ''), msg.imageUrl, msg.imagePreview);
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg?.type === 'aya-toggle-quick-add') {
+      toggleQuickAdd();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg?.type === 'aya-toast') {
+      showToast(String(msg.message ?? ''));
+      return true;
+    }
+    if (msg?.type === 'aya-get-page-text') {
+      const text = extractPageText(document, Math.max(2000, Number(settings.pageContextTrim) || 6000));
+      sendResponse({ text, title: document.title, url: location.href });
+      return true;
+    }
+    if (msg?.type === 'aya-attach-image' && msg.url) {
+      attachment = { url: String(msg.url), preview: msg.preview, name: 'صورة' };
+      if (drawerOpen) renderAttachment();
+      return true;
+    }
+    return false;
+  });
+
+  chrome.storage.onChanged.addListener((changes: Record<string, any>, area: string) => {
+    if (area !== 'local') return;
+    if (changes['aya:settings']) {
+      settings = changes['aya:settings'].newValue ?? {};
+      applyHandle();
+    }
+    if (changes['aya:theme']?.newValue === 'light' || changes['aya:theme']?.newValue === 'dark') {
+      theme = changes['aya:theme'].newValue;
+      if (rootEl) rootEl.dataset.theme = theme;
+    }
+  });
+
+  return undefined;
+}
+
+/* --------------------------------------------------------------- helpers */
+
+function showToast(
+  message: string,
+  options: { state?: 'ok' | 'err'; actionLabel?: string; onAction?: () => void } = {},
+): void {
+  if (!toastHost) return;
+  const toast = document.createElement('div');
+  toast.className = `k-toast ${options.state === 'err' ? 'err' : ''}`;
+
+  const icon = document.createElement('span');
+  icon.className = 'k-toast-icon';
+  icon.textContent = options.state === 'err' ? '⚠️' : '✓';
+  const text = document.createElement('span');
+  text.className = 'k-toast-text';
+  text.textContent = message;
+
+  toast.append(icon, text);
+
+  const action = document.createElement('button');
+  action.className = 'k-toast-action';
+  action.textContent = options.actionLabel ?? 'فتح اللوحة';
+  action.addEventListener('click', () => {
+    if (options.onAction) options.onAction();
+    else chrome.runtime.sendMessage({ type: 'aya-open-sidepanel' }).catch(() => {});
+    toast.remove();
+  });
+  toast.appendChild(action);
+
+  toastHost.appendChild(toast);
+  window.setTimeout(() => toast.remove(), 4000);
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
+}
+
+function sendMessage<T = any>(message: unknown): Promise<T | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage(message, (response: T) => {
+        if (chrome.runtime?.lastError) resolve(null);
+        else resolve(response ?? null);
+      });
+    } catch {
+      resolve(null);
     }
   });
 }
 
-function isInsideInput() {
-  const el = document.activeElement;
-  if (!el) return false;
-  return (el as HTMLElement).tagName === 'INPUT' || (el as HTMLElement).tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable;
-}
+/* ---------------------------------------------------------------- handle */
 
-// ---------- handle ----------
-function renderHandle(shadowRoot: ShadowRoot) {
-  const wrap = document.createElement('div');
-  wrap.className = 'kaya-handle-host';
-  wrap.style.cssText = 'position:fixed;pointer-events:auto;z-index:2147483645;';
-  const bar = document.createElement('div');
-  bar.className = 'kaya-handle';
-  bar.style.cssText = 'position:absolute;width:32px;height:220px;border-radius:16px 16px 16px 16px;background:linear-gradient(180deg,#3a3a3a,#1e1e1e);border:1px solid #3a3a3a;box-shadow:0 8px 22px rgba(0,0,0,.5);display:flex;flex-direction:column;align-items:center;padding:8px 0;cursor:pointer;user-select:none;';
-  bar.innerHTML = `
-    <div class="kaya-handle-grip" style="width:4px;height:40px;border-radius:4px;background:#5a5a5a;margin-bottom:8px;"></div>
-    <div class="kaya-handle-label" style="font-size:9px;color:#9a9a9a;letter-spacing:.5px;white-space:nowrap;">آية</div>
-    <div class="kaya-handle-plus" style="margin-top:auto;width:22px;height:22px;border-radius:50%;background:#de4c4a;color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;box-shadow:0 4px 10px rgba(222,76,74,.4);">+</div>
+function renderHandle() {
+  if (!rootEl || handleEl) return;
+  handleEl = document.createElement('div');
+  handleEl.className = 'k-handle';
+  handleEl.innerHTML = `
+    <div class="k-handle-grip"></div>
+    <div class="k-handle-label">آية</div>
+    <div class="k-handle-plus" title="مهمة سريعة">+</div>
   `;
-  const plus = bar.querySelector('.kaya-handle-plus') as HTMLElement;
-  plus.addEventListener('click', (e) => { e.stopPropagation(); toggleQuickAdd(); });
-  bar.addEventListener('click', () => toggleDrawer());
+  rootEl.appendChild(handleEl);
 
-  shadowRoot.appendChild(wrap);
-  wrap.appendChild(bar);
+  const plus = handleEl.querySelector('.k-handle-plus') as HTMLElement;
+  plus.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleQuickAdd();
+  });
 
-  // Vertical drag for handle position.
-  let dragging = false, startY = 0, startTop = 0;
-  bar.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).classList.contains('kaya-handle-plus')) return;
+  let dragging = false;
+  let moved = false;
+  let startY = 0;
+  let startTop = 0;
+
+  handleEl.addEventListener('pointerdown', (event) => {
+    if ((event.target as HTMLElement).closest('.k-handle-plus')) return;
     dragging = true;
-    startY = e.clientY;
-    startTop = bar.offsetTop + bar.offsetHeight / 2;
-    e.preventDefault();
+    moved = false;
+    startY = event.clientY;
+    startTop = handleEl!.getBoundingClientRect().top;
+    handleEl!.setPointerCapture(event.pointerId);
+    handleEl!.classList.add('dragging');
   });
-  window.addEventListener('mousemove', (e) => {
-    if (!dragging) return;
-    const delta = e.clientY - startY;
-    const top = Math.max(20, Math.min(window.innerHeight - 240, startTop + delta));
-    bar.style.top = (top - bar.offsetHeight / 2) + 'px';
+
+  handleEl.addEventListener('pointermove', (event) => {
+    if (!dragging || !handleEl) return;
+    const delta = event.clientY - startY;
+    if (Math.abs(delta) > 4) moved = true;
+    const top = Math.max(12, Math.min(window.innerHeight - 190, startTop + delta));
+    handleEl.style.top = `${top}px`;
   });
-  window.addEventListener('mouseup', () => { dragging = false; });
-  // initial position
-  bar.style.top = '20px';
-  bar.style.right = '10px';
-  bar.style.left = 'auto';
+
+  handleEl.addEventListener('pointerup', (event) => {
+    if (!dragging || !handleEl) return;
+    dragging = false;
+    handleEl.classList.remove('dragging');
+    handleEl.releasePointerCapture(event.pointerId);
+    const top = Math.round(handleEl.getBoundingClientRect().top);
+    settings.handleY = Math.max(12, top);
+    void chrome.storage.local.set({ 'aya:settings': settings, 'aya:handleY': settings.handleY });
+    if (!moved) toggleDrawer();
+  });
 }
 
-// ---------- overlay (quick-add + drawer host) ----------
-function renderOverlay(overlay: HTMLElement, shadowRoot: ShadowRoot) {
-  shadowRoot.appendChild(overlay);
-  overlay.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).id === 'aya-overlay') {
-      closeDrawer();
-      closeQuickAdd();
+function applyHandle() {
+  if (!handleEl) return;
+  const side = settings.handleSide ?? 'right';
+  if (rootEl) rootEl.dataset.handle = side;
+  handleEl.style.display = side === 'hidden' ? 'none' : 'flex';
+  handleEl.style.top = `${Math.max(12, Number(settings.handleY) || 120)}px`;
+}
+
+/* --------------------------------------------------------- selection bar */
+
+let selectionTimer: number | null = null;
+
+function scheduleSelectionCheck() {
+  if (selectionTimer) window.clearTimeout(selectionTimer);
+  selectionTimer = window.setTimeout(() => {
+    selectionTimer = null;
+    maybeShowToolbar();
+  }, 140);
+}
+
+function maybeShowToolbar() {
+  if (!toolbarEl) return;
+  if (settings.selectionPillEnabled === false) return hideToolbar();
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed) return hideToolbar();
+  const text = selection.toString().trim();
+  if (text.length < 2 || text.length > 2000) return hideToolbar();
+  const active = document.activeElement as HTMLElement | null;
+  if (active && (['INPUT', 'TEXTAREA'].includes(active.tagName) || active.isContentEditable)) return hideToolbar();
+
+  let rect: DOMRect;
+  try {
+    rect = selection.getRangeAt(0).getBoundingClientRect();
+  } catch {
+    return;
+  }
+  if (!rect.width && !rect.height) return hideToolbar();
+
+  selectionText = text;
+  toolbarEl.style.display = 'flex';
+  toolbarEl.style.top = `${Math.max(8, rect.top - 46)}px`;
+  toolbarEl.style.left = `${Math.min(window.innerWidth - 250, Math.max(8, rect.left + rect.width / 2 - 120))}px`;
+}
+
+function hideToolbar() {
+  if (toolbarEl) toolbarEl.style.display = 'none';
+}
+
+function renderToolbar() {
+  if (!toolbarEl) return;
+  const buttons: Array<{ kind: string; label: string; cls: string }> = [
+    { kind: 'task', label: 'مهمة +', cls: 'primary' },
+    { kind: 'note', label: 'ملاحظة 📝', cls: '' },
+    { kind: 'checklist', label: 'تشيك بوكس ☑️', cls: '' },
+    { kind: 'ask', label: 'آية ✨', cls: 'aya' },
+  ];
+  toolbarEl.innerHTML = '';
+  for (const button of buttons) {
+    const el = document.createElement('button');
+    el.className = `k-tool ${button.cls}`;
+    el.textContent = button.label;
+    el.addEventListener('mousedown', (event) => event.preventDefault());
+    el.addEventListener('click', () => {
+      const text = selectionText;
+      hideToolbar();
+      window.getSelection()?.removeAllRanges();
+      if (!text) return;
+      if (button.kind === 'ask') {
+        openDrawer(`اسألي عن النص المحدد:\n«${text}»\n\nالمصدر: ${document.title} (${location.href})`);
+        return;
+      }
+      void sendMessage({ type: 'aya-selection-action', kind: button.kind, text, title: document.title, url: location.href }).then(
+        (response: any) => {
+          showToast(response?.message ?? 'تعذر تنفيذ الإجراء', { state: response?.ok === false ? 'err' : 'ok' });
+        },
+      );
+    });
+    toolbarEl.appendChild(el);
+  }
+}
+
+/* ---------------------------------------------------------------- drawer */
+
+function ensureDrawer(): HTMLElement {
+  if (drawerEl) return drawerEl;
+  drawerEl = document.createElement('aside');
+  drawerEl.className = 'k-drawer';
+  drawerEl.innerHTML = `
+    <header class="k-drawer-head">
+      <div class="k-brand">
+        <div class="k-brand-mark">آ</div>
+        <div>
+          <div class="k-brand-title">آية ✨</div>
+          <div class="k-brand-sub">مساحة عمل سريعة فوق أي صفحة</div>
+        </div>
+      </div>
+      <div class="k-head-actions">
+        <button class="k-icon-btn" data-act="theme" title="الوضع الليلي">🌙</button>
+        <button class="k-icon-btn" data-act="sidepanel" title="فتح اللوحة الجانبية">⇥</button>
+        <button class="k-icon-btn" data-act="close" title="إغلاق">✕</button>
+      </div>
+    </header>
+    <div class="k-drawer-bar">
+      <select class="k-select" data-role="model"><option value="auto">تلقائي ⚡</option></select>
+      <button class="k-chipbtn" data-act="new-chat">+ محادثة</button>
+      <button class="k-chipbtn" data-act="read-page">📄 الصفحة</button>
+    </div>
+    <div class="k-context" data-role="context" hidden></div>
+    <div class="k-messages" data-role="messages">
+      <div class="k-empty">اسألي آية، أو اختاري نصاً في الصفحة واستخدمي شريط التحديد الطائر.</div>
+    </div>
+    <div class="k-attachment" data-role="attachment" hidden></div>
+    <div class="k-composer">
+      <textarea class="k-textarea" data-role="input" rows="2" placeholder="اكتبي رسالة لآية… (Ctrl+V للصق صورة)"></textarea>
+      <div class="k-composer-actions">
+        <button class="k-icon-btn" data-act="image" title="رفع صورة">🖼️</button>
+        <button class="k-icon-btn" data-act="undo" title="تراجع عن دفعة آية" hidden>↩</button>
+        <button class="k-send" data-act="send">إرسال</button>
+      </div>
+    </div>
+  `;
+  rootEl!.appendChild(drawerEl);
+
+  drawerEl.querySelector('[data-act="close"]')!.addEventListener('click', closeDrawer);
+  drawerEl.querySelector('[data-act="sidepanel"]')!.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'aya-open-sidepanel' }).catch(() => {});
+  });
+  drawerEl.querySelector('[data-act="theme"]')!.addEventListener('click', async () => {
+    theme = theme === 'dark' ? 'light' : 'dark';
+    if (rootEl) rootEl.dataset.theme = theme;
+    await saveTheme(theme);
+  });
+  drawerEl.querySelector('[data-act="new-chat"]')!.addEventListener('click', () => {
+    conversationId = '';
+    batchId = null;
+    clearMessages();
+    showToast('محادثة جديدة ✨');
+  });
+  drawerEl.querySelector('[data-act="read-page"]')!.addEventListener('click', attachPageContext);
+  drawerEl.querySelector('[data-act="image"]')!.addEventListener('click', pickImage);
+  drawerEl.querySelector('[data-act="undo"]')!.addEventListener('click', undoBatch);
+  drawerEl.querySelector('[data-act="send"]')!.addEventListener('click', () => {
+    if (streaming) stopStream();
+    else void sendChat();
+  });
+
+  const input = drawerEl.querySelector('[data-role="input"]') as HTMLTextAreaElement;
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      void sendChat();
     }
   });
+  input.addEventListener('paste', (event) => {
+    const item = [...(event.clipboardData?.items ?? [])].find((entry) => entry.type.startsWith('image/'));
+    const file = item?.getAsFile();
+    if (file) {
+      event.preventDefault();
+      void uploadImage(file);
+    }
+  });
+
+  const modelSelect = drawerEl.querySelector('[data-role="model"]') as HTMLSelectElement;
+  void loadModels(modelSelect);
+  return drawerEl;
 }
 
-// ---------- drawer ----------
-async function toggleDrawer() {
+async function loadModels(select: HTMLSelectElement) {
+  if (modelsLoaded) return;
+  const response = await sendMessage<{ ok: boolean; models?: Array<{ id: string; label: string; status?: string; latencyMs?: number }> }>({
+    type: 'aya-config',
+  });
+  if (!response?.ok || !response.models) return;
+  modelsLoaded = true;
+  for (const model of response.models) {
+    const option = document.createElement('option');
+    option.value = model.id;
+    const icon = model.status === 'ok' ? '🟢' : model.status === 'fail' ? '🔴' : '⚪';
+    option.textContent = `${icon} ${model.label}${model.latencyMs ? ` · ${model.latencyMs}ms` : ''}`;
+    select.appendChild(option);
+  }
+}
+
+function openDrawer(prefill = '', imageUrl?: string, imagePreview?: string) {
+  const drawer = ensureDrawer();
+  drawer.classList.add('open');
+  drawerOpen = true;
+  if (prefill) {
+    const input = drawer.querySelector('[data-role="input"]') as HTMLTextAreaElement;
+    input.value = prefill;
+  }
+  if (imageUrl) {
+    attachment = { url: imageUrl, preview: imagePreview, name: 'صورة مرفقة' };
+    renderAttachment();
+  }
+  if (settings.pageContextEnabled !== false && !pageContext) attachPageContext(false);
+  window.setTimeout(() => (drawer.querySelector('[data-role="input"]') as HTMLTextAreaElement).focus(), 80);
+}
+
+function closeDrawer() {
+  drawerEl?.classList.remove('open');
+  drawerOpen = false;
+}
+
+function toggleDrawer() {
   if (drawerOpen) closeDrawer();
   else openDrawer();
 }
 
-async function openDrawer() {
-  if (drawerOpen) return;
-  drawerOpen = true;
-  showOverlay();
-  const host = document.createElement('div');
-  host.className = 'kaya-host kaya-drawer-host';
-  shadow!.appendChild(host);
-  renderDrawer(host);
-  // read settings to know about page context
-  const settings = await readSettings();
-  if (settings.pageContextEnabled && settings.pageContextTrim) {
-    const text = extractPageText(document, settings.pageContextTrim);
-    if (text) {
-      const block = pageContextBlock(document.title, location.href, text, settings.pageContextTrim);
-      // prepend a collapsible context note
-      showContextNote(host, block);
-    }
+function attachPageContext(announce = true) {
+  const text = extractPageText(document, Math.max(1500, Number(settings.pageContextTrim) || 4000));
+  if (!text) {
+    if (announce) showToast('تعذر قراءة نص الصفحة دي', { state: 'err' });
+    return;
   }
-  // Focus composer
-  setTimeout(() => {
-    const inp = host.querySelector('#aya-composer') as HTMLTextAreaElement;
-    if (inp) inp.focus();
-  }, 60);
+  pageContext = { title: document.title || location.href, url: location.href, text };
+  renderContext();
+  if (announce) showToast(`📄 أرفقت الصفحة (${text.length.toLocaleString('ar-EG')} حرف)`);
 }
 
-async function closeDrawer() {
-  drawerOpen = false;
-  const host = shadow!.querySelector('.kaya-drawer-host') as HTMLElement | null;
-  if (host) host.remove();
-  hideOverlayWhenNoDrawer();
+function renderContext() {
+  if (!drawerEl) return;
+  const node = drawerEl.querySelector('[data-role="context"]') as HTMLElement;
+  if (!pageContext) {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  node.innerHTML = `<span class="k-truncate">📄 ${escapeHtml(pageContext.title)}</span><button class="k-icon-btn" data-act="clear-context">✕</button>`;
+  node.querySelector('[data-act="clear-context"]')!.addEventListener('click', () => {
+    pageContext = null;
+    renderContext();
+  });
 }
 
-// ---------- quick-add ----------
-async function toggleQuickAdd() {
-  if (quickAddOpen) closeQuickAdd();
+function renderAttachment() {
+  if (!drawerEl) return;
+  const node = drawerEl.querySelector('[data-role="attachment"]') as HTMLElement;
+  if (!attachment) {
+    node.hidden = true;
+    return;
+  }
+  node.hidden = false;
+  node.innerHTML = `
+    ${attachment.preview ? `<img class="k-thumb" src="${escapeHtml(attachment.preview)}" alt="">` : '<span>📎</span>'}
+    <span class="k-truncate">${escapeHtml(attachment.name)}</span>
+    <button class="k-icon-btn" data-act="clear-attachment">✕</button>
+  `;
+  node.querySelector('[data-act="clear-attachment"]')!.addEventListener('click', () => {
+    attachment = null;
+    renderAttachment();
+  });
+}
+
+function pickImage() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/png,image/jpeg,image/webp,image/gif';
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    if (file) void uploadImage(file);
+  });
+  input.click();
+}
+
+async function uploadImage(file: File) {
+  const dataUrl = await new Promise<string | null>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(file);
+  });
+  if (!dataUrl) return showToast('تعذر قراءة الصورة', { state: 'err' });
+  showToast('⏳ جاري رفع الصورة…');
+  const response = await sendMessage<{ ok: boolean; url?: string; error?: string }>({
+    type: 'aya-upload-dataurl',
+    dataUrl,
+    name: file.name,
+  });
+  if (response?.ok && response.url) {
+    attachment = { url: response.url, preview: dataUrl, name: file.name };
+    renderAttachment();
+    showToast('🖼️ الصورة جاهزة للإرسال');
+  } else {
+    showToast(`تعذر الرفع: ${response?.error ?? 'الخادم غير متاح'}`, { state: 'err' });
+  }
+}
+
+function clearMessages() {
+  const area = drawerEl?.querySelector('[data-role="messages"]') as HTMLElement | null;
+  if (area) area.innerHTML = '<div class="k-empty">محادثة جديدة — اكتبي أول رسالة.</div>';
+}
+
+function appendBubble(bubble: ChatBubble): HTMLElement | null {
+  const area = drawerEl?.querySelector('[data-role="messages"]') as HTMLElement | null;
+  if (!area) return null;
+  area.querySelector('.k-empty')?.remove();
+  const el = document.createElement('div');
+  el.className = `k-msg ${bubble.role}${bubble.error ? ' error' : ''}`;
+  el.innerHTML = `
+    <div class="k-msg-role">${bubble.role === 'user' ? 'أنت' : 'آية ✨'}</div>
+    <div class="k-msg-text"></div>
+    <div class="k-msg-chips"></div>
+  `;
+  (el.querySelector('.k-msg-text') as HTMLElement).textContent = bubble.text;
+  area.appendChild(el);
+  area.scrollTop = area.scrollHeight;
+  return el;
+}
+
+function updateBubbleText(el: HTMLElement | null, text: string) {
+  if (!el) return;
+  (el.querySelector('.k-msg-text') as HTMLElement).textContent = text;
+  const area = el.parentElement;
+  if (area) area.scrollTop = area.scrollHeight;
+}
+
+function addChip(el: HTMLElement | null, name: string, state: 'running' | 'done' | 'fail') {
+  if (!el) return;
+  const chips = el.querySelector('.k-msg-chips') as HTMLElement;
+  let chip = chips.querySelector(`[data-name="${CSS.escape(name)}"]`) as HTMLElement | null;
+  if (!chip) {
+    chip = document.createElement('span');
+    chip.dataset.name = name;
+    chips.appendChild(chip);
+  }
+  chip.className = `k-chip ${state}`;
+  chip.textContent = `${state === 'running' ? '⏳' : state === 'done' ? '✅' : '❌'} ${name}`;
+}
+
+async function sendChat() {
+  if (!drawerEl || streaming) return;
+  const input = drawerEl.querySelector('[data-role="input"]') as HTMLTextAreaElement;
+  const modelSelect = drawerEl.querySelector('[data-role="model"]') as HTMLSelectElement;
+  const text = input.value.trim();
+  if (!text && !attachment) return;
+
+  const parts: string[] = [];
+  if (text) parts.push(text);
+  if (attachment) parts.push(`🖼️ مرفق: ${attachment.url}`);
+  if (pageContext) {
+    parts.push(`— سياق الصفحة —\n${pageContextBlock(pageContext.title, pageContext.url, pageContext.text, settings.pageContextTrim || 4000)}`);
+  }
+  const payloadText = parts.join('\n\n');
+
+  appendBubble({ role: 'user', text: text || '📎 مرفق', chips: [] });
+  const assistant = appendBubble({ role: 'assistant', text: '', chips: [] });
+  let assistantText = '';
+
+  input.value = '';
+  attachment = null;
+  renderAttachment();
+  streaming = true;
+  batchId = null;
+  const undoBtn = drawerEl.querySelector('[data-act="undo"]') as HTMLButtonElement;
+  undoBtn.hidden = true;
+  const sendBtn = drawerEl.querySelector('[data-act="send"]') as HTMLButtonElement;
+  sendBtn.textContent = '⏹ إيقاف';
+  sendBtn.classList.add('stop');
+
+  const port = chrome.runtime.connect({ name: 'aya-chat' });
+  streamPort = port;
+  port.onMessage.addListener((message: any) => {
+    if (message?.type === 'event') {
+      const { event, data } = message;
+      if (event === 'meta' && data?.conversationId) conversationId = data.conversationId;
+      else if (event === 'delta' && typeof data?.text === 'string') {
+        assistantText += data.text;
+        updateBubbleText(assistant, assistantText);
+      } else if (event === 'tool_start') addChip(assistant, String(data?.name ?? 'tool'), 'running');
+      else if (event === 'tool_result') addChip(assistant, String(data?.name ?? 'tool'), data?.ok === false ? 'fail' : 'done');
+      else if (event === 'done') {
+        if (data?.batchId) {
+          batchId = data.batchId;
+          undoBtn.hidden = false;
+        }
+      } else if (event === 'error') {
+        assistantText = assistantText || `خطأ: ${data?.message ?? 'غير متوقع'}`;
+        assistant?.classList.add('error');
+        updateBubbleText(assistant, assistantText);
+      }
+    } else if (message?.type === 'stream-error') {
+      assistantText = `تعذر الاتصال: ${message.message}`;
+      assistant?.classList.add('error');
+      updateBubbleText(assistant, assistantText);
+    } else if (message?.type === 'end') {
+      finishStream();
+    }
+  });
+  port.onDisconnect.addListener(() => finishStream());
+  port.postMessage({
+    type: 'start',
+    payload: {
+      text: payloadText,
+      conversationId: conversationId || undefined,
+      modelId: modelSelect.value === 'auto' ? undefined : modelSelect.value,
+    },
+  });
+}
+
+function finishStream() {
+  streaming = false;
+  const sendBtn = drawerEl?.querySelector('[data-act="send"]') as HTMLButtonElement | null;
+  if (sendBtn) {
+    sendBtn.textContent = 'إرسال';
+    sendBtn.classList.remove('stop');
+  }
+  streamPort = null;
+}
+
+function stopStream() {
+  try {
+    streamPort?.disconnect();
+  } catch {
+    /* already closed */
+  }
+  finishStream();
+}
+
+async function undoBatch() {
+  if (!batchId) return;
+  const response = await sendMessage<{ ok: boolean; undone?: number; error?: any }>({ type: 'aya-undo', batchId });
+  if (response?.ok) {
+    showToast(`↩ تم التراجع عن ${response.undone ?? 0} عملية`);
+    batchId = null;
+    const undoBtn = drawerEl?.querySelector('[data-act="undo"]') as HTMLElement | null;
+    if (undoBtn) undoBtn.hidden = true;
+  } else {
+    showToast('تعذر التراجع', { state: 'err' });
+  }
+}
+
+/* ------------------------------------------------------------- quick add */
+
+function toggleQuickAdd() {
+  if (quickOpen) closeQuickAdd();
   else openQuickAdd();
 }
 
-async function openQuickAdd() {
-  if (quickAddOpen) return;
-  quickAddOpen = true;
-  showOverlay();
-  const modal = document.createElement('div');
-  modal.className = 'kaya-overlay';
-  modal.id = 'aya-quick-add-overlay';
-  const inner = document.createElement('div');
-  inner.className = 'kaya-host';
-  inner.style.cssText = 'align-items:center;justify-content:center;';
-  modal.appendChild(inner);
-  shadow!.appendChild(modal);
-  renderQuickAdd(inner);
-}
-
-async function closeQuickAdd() {
-  quickAddOpen = false;
-  const m = shadow!.querySelector('#aya-quick-add-overlay') as HTMLElement | null;
-  if (m) m.remove();
-  hideOverlayWhenNoDrawer();
-}
-
-function showOverlay() {
-  const o = shadow!.querySelector('.kaya-overlay') as HTMLElement;
-  o.style.display = 'flex';
-  // ensure a single overlay
-  const existing = shadow!.querySelectorAll('.kaya-overlay').length;
-  if (existing > 1) {
-    // remove extras
-    const nodes = shadow!.querySelectorAll('.kaya-overlay');
-    for (let i = nodes.length - 1; i > 0; i--) nodes[i]!.remove();
-  }
-}
-
-function hideOverlayWhenNoDrawer() {
-  const o = shadow!.querySelector('.kaya-overlay') as HTMLElement | null;
-  if (o && !shadow!.querySelector('.kaya-drawer-host') && !shadow!.querySelector('#aya-quick-add-overlay')) {
-    o.style.display = 'none';
-  }
-}
-
-async function readSettings() {
-  return new Promise<any>((resolve) => {
-    chrome.storage.local.get(['aya:settings'], (r: any) => resolve(r['aya:settings'] || null));
-  });
-}
-
-function showContextNote(host: HTMLElement, block: string) {
-  const note = document.createElement('div');
-  note.style.cssText = 'padding:8px 12px;background:#2a2a2a;border-bottom:1px solid #323232;color:#9a9a9a;font-size:11px;border-radius:12px 12px 0 0;cursor:text;max-height:80px;overflow:auto;user-select:none;';
-  note.textContent = '📄 الصفحة المفتوحة — اضغط للنسخ / إخفاء';
-  note.addEventListener('click', () => {
-    clipboardWrite(block).catch(() => {});
-  });
-  host.appendChild(note);
-}
-
-async function clipboardWrite(text: string) {
-  if (navigator.clipboard && window.isSecureContext) {
-    await navigator.clipboard.writeText(text);
-  } else {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  }
-}
-
-// ---------- drawer render ----------
-function renderDrawer(host: HTMLElement) {
-  host.style.cssText = 'width:360px;max-width:90vw;height:78vh;max-height:calc(100vh - 40px);background:#242424;border:1px solid #323232;border-radius:16px 0 0 16px;box-shadow:0 12px 36px rgba(0,0,0,.5);display:flex;flex-direction:column;position:relative;justify-content:space-between;';
-  if (window.matchMedia('(prefers-color-scheme: light)').matches) {
-    host.style.background = '#2c2c2c';
-  }
-
-  // Header
-  const head = document.createElement('div');
-  head.style.cssText = 'padding:12px 14px;border-bottom:1px solid #323232;display:flex;align-items:center;justify-content:space-between;gap:8px;';
-  head.innerHTML = `
-    <div style="display:flex;align-items:center;gap:8px;">
-      <div style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#de4c4a,#8b5cf6);display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:12px;">آ</div>
-      <div>
-        <div style="font-size:13px;color:#fbfbfb;font-weight:600;">آية ✨</div>
-        <div style="font-size:10px;color:#9a9a9a;">تلقائي</div>
+function openQuickAdd() {
+  if (!rootEl) return;
+  if (quickOpen) return;
+  quickOpen = true;
+  quickEl = document.createElement('div');
+  quickEl.className = 'k-overlay';
+  quickEl.innerHTML = `
+    <div class="k-modal" role="dialog" aria-label="مهمة سريعة">
+      <div class="k-modal-head">
+        <div class="k-brand-title">إضافة سريعة</div>
+        <button class="k-icon-btn" data-act="close">✕</button>
       </div>
-    </div>
-    <div style="display:flex;gap:4px;">
-      <button class="k-btn k-btn-ghost" id="aya-page-context-toggle" style="padding:4px 8px;border-radius:8px;font-size:11px;">📄 الصفحة</button>
-      <button class="k-btn k-btn-ghost" id="aya-stop" style="padding:4px 8px;border-radius:8px;font-size:11px;color:#ff8a82;">🛑 إيقاف</button>
-      <button class="k-btn k-btn-ghost" id="aya-close-drawer" style="padding:4px 8px;border-radius:8px;font-size:11px;">✕</button>
-    </div>
-  `;
-  host.appendChild(head);
-
-  // Model switcher row
-  const modelRow = document.createElement('div');
-  modelRow.style.cssText = 'padding:8px 14px;border-bottom:1px solid #2a2a2a;display:flex;align-items:center;gap:8px;';
-  modelRow.innerHTML = `
-    <span class="k-label" style="font-size:10px;color:#9a9a9a;">الموديل</span>
-    <select id="aya-model" style="flex:1;background:#1e1e1e;color:#fbfbfb;border:1px solid #323232;border-radius:8px;padding:5px 8px;font-size:12px;"></select>
-  `;
-  host.appendChild(modelRow);
-
-  // Composer
-  const composer = document.createElement('div');
-  composer.style.cssText = 'padding:10px 14px;display:flex;flex-direction:column;gap:8px;';
-  composer.innerHTML = `
-    <div style="display:flex;gap:8px;align-items:flex-start;">
-      <div style="position:relative;flex:1;">
-        <textarea id="aya-composer" class="k-input" rows="2" placeholder="اكتبي رسالة لآية…" style="resize:vertical;min-height:40px;"></textarea>
-        <div id="aya-attach-preview" style="position:absolute;right:-2px;top:-2px;width:36px;height:36px;border-radius:8px;background:#3a3a3a;display:none;align-items:center;justify-content:center;border:1px solid #4a4a4a;">
-          <span style="color:#fbfbfb;font-size:16px;">🖼️</span>
+      <div class="k-modal-body">
+        <input class="k-input" data-role="title" placeholder="عنوان المهمة…" />
+        <textarea class="k-textarea" data-role="desc" rows="2" placeholder="وصف أو ملاحظات (اختياري)"></textarea>
+        <div class="k-inline">
+          <div class="k-segmented">
+            <button data-mode="task" class="active">مهمة</button>
+            <button data-mode="note">ملاحظة</button>
+            <button data-mode="checklist">تشيك بوكس</button>
+          </div>
+          <select class="k-select" data-role="priority">
+            <option value="4">P4 عادي</option>
+            <option value="3">P3 مهم</option>
+            <option value="2">P2 عاجل</option>
+            <option value="1">P1 ضروري</option>
+          </select>
+          <select class="k-select" data-role="project"><option value="">الوارد</option></select>
         </div>
+        <label class="k-check"><input type="checkbox" data-role="link" checked /> ربط الصفحة الحالية</label>
       </div>
-      <div style="display:flex;flex-direction:column;gap:4px;">
-        <button class="k-btn k-btn-ghost" id="aya-image-btn" style="padding:6px;width:36px;height:36px;border-radius:10px;font-size:16px;" title="رفع صورة">🖼️</button>
-        <button class="k-btn k-btn-ghost k-accent" id="aya-send" style="padding:6px 14px;border-radius:10px;font-size:12px;font-weight:600;">إرسال</button>
+      <div class="k-modal-foot">
+        <button class="k-btn ghost" data-act="cancel">إلغاء</button>
+        <button class="k-btn primary" data-act="save">إضافة ✓</button>
       </div>
     </div>
   `;
-  host.appendChild(composer);
+  rootEl.appendChild(quickEl);
 
-  // Tool chips + stream text area
-  const stream = document.createElement('div');
-  stream.style.cssText = 'padding:0 14px 10px;display:flex;flex-direction:column;gap:8px;flex:1;min-height:0;overflow:auto;';
-  stream.id = 'aya-stream';
-  stream.innerHTML = `<div id="aya-stream-text" style="font-size:13px;color:#fbfbfb;line-height:1.55;white-space:pre-wrap;word-break:break-word;"></div>`;
-  host.appendChild(stream);
-
-  // Footer toolbar
-  const foot = document.createElement('div');
-  foot.style.cssText = 'padding:8px 14px;border-top:1px solid #323232;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-  host.appendChild(foot);
-
-  // Wire buttons
-  const send = host.querySelector('#aya-send') as HTMLButtonElement;
-  const composerText = host.querySelector('#aya-composer') as HTMLTextAreaElement;
-  const stopBtn = host.querySelector('#aya-stop') as HTMLButtonElement;
-  const closeBtn = host.querySelector('#aya-close-drawer') as HTMLButtonElement;
-  const modelSelect = host.querySelector('#aya-model') as HTMLSelectElement;
-  const pageToggle = host.querySelector('#aya-page-context-toggle') as HTMLButtonElement;
-  const imageBtn = host.querySelector('#aya-image-btn') as HTMLButtonElement;
-  const attachPreview = host.querySelector('#aya-attach-preview') as HTMLElement;
-
-  send.addEventListener('click', async () => {
-    await sendMessage(host, composerText, modelSelect.value, !!pageToggle.dataset.on);
+  let mode: 'task' | 'note' | 'checklist' = 'task';
+  quickEl.querySelector('[data-act="close"]')!.addEventListener('click', closeQuickAdd);
+  quickEl.querySelector('[data-act="cancel"]')!.addEventListener('click', closeQuickAdd);
+  quickEl.addEventListener('click', (event) => {
+    if (event.target === quickEl) closeQuickAdd();
   });
-  composerText.addEventListener('keydown', async (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      await sendMessage(host, composerText, modelSelect.value, !!pageToggle.dataset.on);
-    }
-  });
-  stopBtn.addEventListener('click', () => stopStream(host));
-  closeBtn.addEventListener('click', () => closeDrawer());
-  pageToggle.addEventListener('click', async () => {
-    const on = !pageToggle.dataset.on;
-    pageToggle.dataset.on = String(on);
-    pageToggle.style.opacity = on ? '1' : '.4';
-    pageToggle.textContent = on ? '📄 الصفحة ✓' : '📄 الصفحة';
-    // if drawer open, re-render context note
-    const existing = host.querySelector('[data-aya-context]') as HTMLElement | null;
-    if (existing) existing.remove();
-    if (on) {
-      const settings = await readSettings();
-      const text = extractPageText(document, settings?.pageContextTrim || 4000);
-      if (text) {
-        const block = pageContextBlock(document.title, location.href, text, settings?.pageContextTrim || 4000);
-        showContextNote(host, block);
-        const cur = host.appendChild ? host : host;
-        const n = document.createElement('div');
-        n.setAttribute('data-aya-context', '1');
-        n.style.cssText = 'padding:8px 12px;background:#2a2a2a;border-bottom:1px solid #323232;color:#9a9a9a;font-size:11px;border-radius:12px 12px 0 0;cursor:text;max-height:80px;overflow:auto;user-select:none;';
-        n.textContent = '📄 الصفحة المفتوحة — اضغط للنسخ';
-        n.addEventListener('click', () => clipboardWrite(block).catch(()=>{}));
-        host.insertBefore(n, host.firstChild);
-      }
-    }
-  });
-  imageBtn.addEventListener('click', () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/png,image/jpeg,image/webp,image/gif';
-    input.click();
-    input.addEventListener('change', async () => {
-      const file = input.files?.[0];
-      if (!file) return;
-      pendingImage = file;
-      attachPreview.style.display = 'flex';
-      attachPreview.textContent = '🖼️';
-      // update placeholder text
-      composerText.placeholder = 'أرفعي صورة ثم اكتبي رسالة…';
+  quickEl.querySelectorAll('[data-mode]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const next = (button as HTMLElement).dataset.mode;
+      mode = next === 'note' ? 'note' : next === 'checklist' ? 'checklist' : 'task';
+      quickEl!.querySelectorAll('[data-mode]').forEach((node) => node.classList.toggle('active', node === button));
     });
   });
-  // Allow paste of images
-  composerText.addEventListener('paste', async (e) => {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const it of items) {
-      if (it.type.startsWith('image/')) {
-        e.preventDefault();
-        const blob = it.getAsFile();
-        if (blob) {
-          pendingImage = blob;
-          attachPreview.style.display = 'flex';
-          composerText.placeholder = 'أرفعي صورة ثم اكتبي رسالة…';
-        }
-        break;
-      }
+
+  const title = quickEl.querySelector('[data-role="title"]') as HTMLInputElement;
+  const desc = quickEl.querySelector('[data-role="desc"]') as HTMLTextAreaElement;
+  const priority = quickEl.querySelector('[data-role="priority"]') as HTMLSelectElement;
+  const project = quickEl.querySelector('[data-role="project"]') as HTMLSelectElement;
+  const link = quickEl.querySelector('[data-role="link"]') as HTMLInputElement;
+  priority.value = String(settings.quickAddDefaultPriority ?? 4);
+  if (document.title) title.value = document.title.replace(/\s*[-–—|]\s*.{0,48}$/, '').slice(0, 120);
+
+  void sendMessage<{ ok: boolean; projects?: Array<{ id: string; name: string; nameAr?: string; isInbox?: boolean }> }>({
+    type: 'aya-snapshot',
+  }).then((response) => {
+    for (const row of response?.projects ?? []) {
+      if (row.isInbox) continue;
+      const option = document.createElement('option');
+      option.value = row.id;
+      option.textContent = row.nameAr || row.name;
+      project.appendChild(option);
     }
   });
-}
 
-// Populate model list from server health/config on first open
-async function populateModelSelect(select: HTMLSelectElement) {
-  try {
-    const health = await ayaServer.health();
-    // We don't expose full model list cheaply from health; show a graceful default.
-  } catch {}
-  select.value = 'auto';
-  const opt = document.createElement('option');
-  opt.value = 'auto';
-  opt.textContent = 'تلقائي';
-  select.appendChild(opt);
-}
-
-let streamController: ReadableStreamDefaultController<any> | null = null;
-
-async function sendMessage(host: HTMLElement, textarea: HTMLTextAreaElement, modelId: string, withPageContext: boolean) {
-  const text = textarea.value.trim();
-  if (!text && !pendingImage) return;
-  // Build payload similar to the app's ayaApi.chatStream shape
-  const payload = {
-    conversationId: null,
-    text,
-    language: 'ar',
-    modelId,
-    attachments: pendingImage ? [{ kind: 'image', file: pendingImage }] : [],
-    pageContext: withPageContext ? undefined : null,
-  };
-  textarea.value = '';
-  pendingImage = null;
-  const preview = host.querySelector('#aya-attach-preview') as HTMLElement | null;
-  if (preview) preview.style.display = 'none';
-
-  // Stream
-  startStream(host, payload);
-}
-
-function startStream(host: HTMLElement, payload: any) {
-  const textEl = host.querySelector('#aya-stream-text') as HTMLElement | null;
-  const chipsEl = document.createElement('div');
-  chipsEl.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;padding:0 0 4px 0;';
-  chipsEl.id = 'aya-chips';
-  const streamEl = host.querySelector('#aya-stream') as HTMLElement;
-  streamEl.insertBefore(chipsEl, streamEl.firstChild);
-  if (textEl) textEl.textContent = '⏳ جاري التفكير…';
-
-  const stream = ayaServer.chatStream(payload);
-  const reader = stream.getReader();
-  (async () => {
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const { event, data } = value;
-        if (event === 'meta') {
-          // possibly update conversation id
-        } else if (event === 'delta') {
-          if (textEl && data?.text) {
-            textEl.textContent = (textEl.textContent || '') + data.text;
-          }
-        } else if (event === 'tool_start') {
-          addChip(chipsEl, data.name, 'running');
-        } else if (event === 'tool_result') {
-          const chip = chipsEl.querySelector(`[data-chip="${data.name}"]`) as HTMLElement | null;
-          if (chip) {
-            chip.className = `k-chip ${data.ok ? 'done' : 'fail'}`;
-            chip.textContent = data.ok ? `✅ ${data.name}` : `❌ ${data.name}`;
-            if (data.summary) {
-              const note = document.createElement('div');
-              note.style.cssText = 'font-size:11px;color:#9a9a9a;background:#2a2a2a;padding:4px 8px;border-radius:8px;margin-top:4px;line-height:1.4;';
-              note.textContent = data.summary;
-              chipsEl.appendChild(note);
-            }
-          }
-        } else if (event === 'done') {
-          if (textEl) textEl.textContent = (textEl.textContent || '') + (data?.text || '');
-          // enable undo if batchId
-          if (data?.batchId) {
-            const undo = document.createElement('button');
-            undo.className = 'k-btn k-btn-ghost k-aya';
-            undo.style.cssText = 'padding:4px 8px;border-radius:8px;font-size:11px;';
-            undo.textContent = '↩ Established batch (undo)';
-            undo.addEventListener('click', async () => {
-              undo.textContent = '⏳ جاري التراجع…';
-              try {
-                const res = await ayaServer.command({ name: 'batch.undo', input: { batchId: data.batchId }, actor: 'user', confirmed: true });
-                if (res.ok) undo.textContent = '↩ تم التراجع';
-                else undo.textContent = `تراجع فشل: ${res.error?.message || res.error}`;
-              } catch {
-                undo.textContent = 'تراجع فشل';
-              }
-            });
-            chipsEl.appendChild(undo);
-          }
-        } else if (event === 'error') {
-          if (textEl) textEl.textContent = `خطأ: ${data?.message || 'غير متوقع'}`;
-        }
-      }
-    } catch (err) {
-      if (textEl) textEl.textContent = `اتصال فشل: ${err}`;
+  const save = async () => {
+    const value = title.value.trim();
+    if (!value) {
+      title.focus();
+      return;
     }
-  })();
-}
-
-function addChip(container: HTMLElement, name: string, state: 'running' | 'done' | 'fail') {
-  const chip = document.createElement('span');
-  chip.className = `k-chip ${state}`;
-  chip.dataset.chip = name;
-  chip.textContent = state === 'running' ? `⏳ ${name}` : (state === 'done' ? `✅ ${name}` : `❌ ${name}`);
-  container.appendChild(chip);
-}
-
-function stopStream(host: HTMLElement) {
-  streamController?.close();
-  streamController = null;
-}
-
-// ---------- quick-add ----------
-function renderQuickAdd(host: HTMLElement) {
-  const modal = document.createElement('div');
-  modal.className = 'kaya-overlay';
-  modal.id = 'aya-quick-add-overlay';
-  host.innerHTML = '';
-  host.appendChild(modal);
-  const inner = document.createElement('div');
-  inner.className = 'kaya-host';
-  inner.style.cssText = 'align-items:center;justify-content:center;';
-  modal.appendChild(inner);
-  const card = document.createElement('div');
-  card.style.cssText = 'width:340px;max-width:calc(100vw - 40px);background:#242424;border:1px solid #323232;border-radius:16px;padding:16px;box-shadow:0 12px 36px rgba(0,0,0,.5);';
-  card.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-      <div style="font-size:13px;color:#fbfbfb;font-weight:600;">مهمة سريعة</div>
-      <button class="k-btn k-btn-ghost" id="aya-qa-close" style="padding:4px 8px;border-radius:8px;color:#9a9a9a;">✕</button>
-    </div>
-    <div style="margin-bottom:8px;">
-      <label class="k-label">عنوان المهمة</label>
-      <input id="aya-qa-title" class="k-input" placeholder="مهمة جديدة…" style="margin-bottom:4px;">
-    </div>
-    <div style="margin-bottom:8px;">
-      <label class="k-label">وصف (اختياري)</label>
-      <textarea id="aya-qa-desc" class="k-input" rows="2" placeholder="وصف أو ملاحظات…" style="resize:vertical;min-height:40px;"></textarea>
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-      <label class="k-label" style="margin-bottom:0;">ربط الصفحة الحالية</label>
-      <input id="aya-qa-link" type="checkbox" class="k-checkbox" checked style="accent-color:#de4c4a;width:14px;height:14px;display:inline-block;vertical-align:middle;margin-right:4px;">
-    </div>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-      <label class="k-label" style="margin-bottom:0;">الأولوية</label>
-      <select id="aya-qa-priority" style="flex:1;background:#1e1e1e;color:#fbfbfb;border:1px solid #323232;border-radius:8px;padding:5px 8px;font-size:12px;">
-        <option value="4">P4 عادي</option>
-        <option value="3">P3 مهم</option>
-        <option value="2">P2 عاجل</option>
-        <option value="1">P1 ضروري</option>
-      </select>
-    </div>
-    <button class="k-btn k-btn-primary" id="aya-qa-confirm" style="width:100%;padding:8px;border-radius:10px;font-weight:600;font-size:13px;">إضافة المهمة ✓</button>
-  `;
-  inner.appendChild(card);
-
-  const titleInput = card.querySelector('#aya-qa-title') as HTMLInputElement;
-  const descInput = card.querySelector('#aya-qa-desc') as HTMLTextAreaElement;
-  const linkCheck = card.querySelector('#aya-qa-link') as HTMLInputElement;
-  const prioritySelect = card.querySelector('#aya-qa-priority') as HTMLSelectElement;
-  const confirmBtn = card.querySelector('#aya-qa-confirm') as HTMLButtonElement;
-  const closeBtn = card.querySelector('#aya-qa-close') as HTMLButtonElement;
-
-  // pre-fill title with page title?
-  if (document.title) {
-    const trimmed = document.title.replace(/\s*[-–—]\s*.{0,40}$/i, '').trim();
-    if (trimmed && trimmed.length < 120) titleInput.value = trimmed;
-  }
-
-  confirmBtn.addEventListener('click', async () => {
-    const title = titleInput.value.trim();
-    if (!title) { titleInput.focus(); return; }
-    const desc = descInput.value.trim();
-    const link = linkCheck.checked;
-    const priority = parseInt(prioritySelect.value, 10) as 0 | 1 | 2 | 3;
-    confirmBtn.textContent = 'جاري الإضافة…';
-    confirmBtn.disabled = true;
-    try {
-      const input: any = { content: title };
-      if (desc) input.description = desc;
-      if (priority !== 4) input.priority = priority;
-      if (link) {
-        input.description = [input.description, `الصفحة: ${document.title || location.href}`, location.href].filter(Boolean).join('\n\n');
-      }
-      const res = await ayaServer.command({ name: 'task.create', input, actor: 'user', confirmed: true });
-      if (res.ok) {
-        showToast('✅ تمت إضافة المهمة');
-        closeQuickAdd();
-      } else {
-        showToast('فشل إضافة المهمة: ' + (res.error?.message || res.error));
-      }
-    } catch (err) {
-      // offline: enqueue
-      const id = await enqueueOffline({ name: 'task.create', input: { content: title, description: desc, priority }, actor: 'user', confirmed: true });
-      showToast('تم حفظ المهمة للمراسلة لاحقًا ✓');
+    const descriptionParts: string[] = [];
+    if (desc.value.trim()) descriptionParts.push(desc.value.trim());
+    if (link.checked) descriptionParts.push(`المصدر: ${document.title} (${location.href})`);
+    const checklistMode = mode === 'checklist';
+    const checklistItems = checklistMode
+      ? (desc.value.trim() ? desc.value.split(/\r?\n/).map((row) => row.replace(/^[\s•\-*\d]+[\.\)]?\s*/, '').trim()).filter(Boolean) : [value])
+      : [];
+    const input: Record<string, unknown> = {
+      content: mode === 'note' ? `📝 ${value}` : checklistMode ? `☑️ ${value}` : value,
+      priority: Number(priority.value),
+      description: checklistMode ? descriptionParts.slice(1).join('\n\n') || undefined : descriptionParts.join('\n\n') || undefined,
+      projectId: project.value || undefined,
+    };
+    if (mode === 'note') input.labelNames = ['ملاحظة'];
+    if (checklistMode) input.checklistItems = checklistItems;
+    const response = await sendMessage<{ ok: boolean; queued?: boolean }>({ type: 'aya-create-task', input });
+    if (response?.ok) {
+      showToast(response.queued ? '📥 أوفلاين — هتتبعت لما الاتصال يرجع' : mode === 'note' ? '📝 تم حفظ الملاحظة' : '✓ تمت إضافة المهمة');
       closeQuickAdd();
-    } finally {
-      confirmBtn.textContent = 'إضافة المهمة ✓';
-      confirmBtn.disabled = false;
+    } else {
+      showToast('تعذر إضافة العنصر', { state: 'err' });
+    }
+  };
+
+  quickEl.querySelector('[data-act="save"]')!.addEventListener('click', save);
+  title.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      void save();
     }
   });
-  closeBtn.addEventListener('click', () => closeQuickAdd());
-  // Enter in title -> confirm
-  titleInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); confirmBtn.click(); } });
-  descInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); confirmBtn.click(); } });
+  window.setTimeout(() => title.focus(), 60);
 }
 
-async function enqueueOffline(op: { name: string; input: any; actor: 'user' | 'ai' | 'system'; confirmed: boolean }) {
-  const { enqueueOperation } = await import('../lib/queue');
-  return enqueueOperation(op);
+function closeQuickAdd() {
+  quickEl?.remove();
+  quickEl = null;
+  quickOpen = false;
 }
 
-function showToast(msg: string) {
-  const existing = document.querySelector('.k-toast') as HTMLElement | null;
-  if (existing) existing.remove();
-  const t = document.createElement('div');
-  t.className = 'k-toast';
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => t.remove(), 3200);
-}
+/* ---------------------------------------------------------------- startup */
 
-// expose for popup / sidepanel to toggle drawer without creating a new one
-export function showDrawer() { openDrawer(); }
-export function hideDrawer() { closeDrawer(); }
+void boot();
 
-// ---------- bootstrap per tab ----------
-// Chrome fires the content script on every page. We mount once and persist handle position.
-let bootstrapped = false;
-(async () => {
-  if (bootstrapped) return;
-  bootstrapped = true;
-  await mountAyaExtension();
-  // restore handle Y
-  const y = await new Promise<number>((resolve) => {
-    chrome.storage.local.get(['aya:handleY'], (r: any) => resolve(r['aya:handleY'] ?? 120));
-  });
-  const bar = document.querySelector('.kaya-handle') as HTMLElement | null;
-  if (bar) bar.style.top = y + 'px';
-})();
+export {};

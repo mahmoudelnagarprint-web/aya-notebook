@@ -1,8 +1,9 @@
 /**
- * Offline queue persistence + flush. Lives in the background worker.
- * If the server is unreachable when the user submits a task/note/link, the
- * operation is held in `chrome.storage.local` and replayed on the next
- * successful connection (alarm every ~2 minutes or on health check success).
+ * Offline queue persistence + replay.
+ *
+ * When the server is unreachable the operation is kept in `chrome.storage.local`
+ * and replayed through the same `/api/v1/command/:name` endpoint later. The
+ * background worker flushes on a 2-minute alarm and when health recovers.
  */
 
 import { STORAGE_KEYS, nextOperationId } from './core';
@@ -11,74 +12,61 @@ import type { QueuedOperation } from './core';
 
 const QUEUE_KEY = STORAGE_KEYS.QUEUE;
 
-function readQueue(): Promise<{ operations: QueuedOperation[]; lastAttemptAt: string | null }> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([QUEUE_KEY], (res: any) => {
-      const q = (res && res[QUEUE_KEY]) || { operations: [], lastAttemptAt: null };
-      resolve(q as { operations: QueuedOperation[]; lastAttemptAt: string | null });
-    });
-  });
+export interface QueueState {
+  operations: QueuedOperation[];
+  lastAttemptAt: string | null;
 }
 
-function writeQueue(q: { operations: QueuedOperation[]; lastAttemptAt: string | null }) {
-  chrome.storage.local.set({ [QUEUE_KEY]: q });
+export async function readQueue(): Promise<QueueState> {
+  const res = (await chrome.storage.local.get([QUEUE_KEY])) as Record<string, any>;
+  const stored = res?.[QUEUE_KEY];
+  return {
+    operations: Array.isArray(stored?.operations) ? stored.operations : [],
+    lastAttemptAt: stored?.lastAttemptAt ?? null,
+  };
 }
 
-/**
- * Enqueue an operation. Returns the id assigned.
- */
-export async function enqueueOperation(op: Omit<QueuedOperation, 'id' | 'createdAt'>): Promise<string> {
+async function writeQueue(state: QueueState): Promise<void> {
+  await chrome.storage.local.set({ [QUEUE_KEY]: state });
+}
+
+export async function enqueueOperation(
+  op: Omit<QueuedOperation, 'id' | 'createdAt'>,
+): Promise<string> {
   const id = nextOperationId();
   const entry: QueuedOperation = { ...op, id, createdAt: new Date().toISOString() };
-  const q = await readQueue();
-  q.operations.push(entry);
-  await writeQueue(q);
-  await chrome.storage.local.set({ [STORAGE_KEYS.UNREAD]: (await chrome.storage.local.get([STORAGE_KEYS.UNREAD]))[STORAGE_KEYS.UNREAD] + 1 });
+  const queue = await readQueue();
+  queue.operations.push(entry);
+  await writeQueue(queue);
   return id;
 }
 
-/**
- * Attempt to flush the queue to the server. Returns { flushed, failed, total }.
- * Each operation is submitted through the server `/api/v1/sync` endpoint so the
- * server can replay them through the same bus (idempotent-ish via client id).
- */
+/** Replays every pending operation. Returns counts for the UI. */
 export async function flushQueue(): Promise<{ flushed: number; failed: number; total: number }> {
-  const q = await readQueue();
-  if (!q.operations.length) return { flushed: 0, failed: 0, total: 0 };
+  const queue = await readQueue();
+  const total = queue.operations.length;
+  if (!total) return { flushed: 0, failed: 0, total: 0 };
 
-  const now = new Date().toISOString();
-  const ops = q.operations.map((op) => ({
-    id: op.id,
-    name: op.name,
-    input: op.input,
-    actor: op.actor,
-    confirmed: op.confirmed,
-    batchId: op.batchId ?? undefined,
-  }));
-
-  let result: { ok: boolean; applied?: Array<{ id?: string; name: string; ok: boolean; error?: string }>; error?: any };
-  try {
-    result = await ayaServer.sync(q.operations[0].id, ops);
-  } catch (err) {
-    result = { ok: false, error: err as any };
+  const remaining: QueuedOperation[] = [];
+  let flushed = 0;
+  for (const op of queue.operations) {
+    try {
+      await ayaServer.command(op.name, op.input);
+      flushed += 1;
+    } catch {
+      remaining.push(op);
+    }
   }
 
-  const qAfter = await readQueue();
-  const applied = (result as any)?.applied ?? [];
-  const flushedIds = new Set(applied.filter((a: any) => a.ok).map((a: any) => a.id));
-  const remaining = qAfter.operations.filter((op) => !flushedIds.has(op.id));
-  const failed = remaining.length;
-  await writeQueue({ operations: remaining, lastAttemptAt: now });
-  if (!failed) {
-    await chrome.storage.local.set({ [STORAGE_KEYS.UNREAD]: 0 });
-  }
-  return { flushed: qAfter.operations.length - failed, failed, total: qAfter.operations.length };
+  await writeQueue({ operations: remaining, lastAttemptAt: new Date().toISOString() });
+  return { flushed, failed: remaining.length, total };
 }
 
-/**
- * Return the current queue count and whether a flush is pending.
- */
 export async function queueStatus(): Promise<{ count: number; pending: boolean; lastAttemptAt: string | null }> {
-  const q = await readQueue();
-  return { count: q.operations.length, pending: q.operations.length > 0, lastAttemptAt: q.lastAttemptAt };
+  const queue = await readQueue();
+  return { count: queue.operations.length, pending: queue.operations.length > 0, lastAttemptAt: queue.lastAttemptAt };
+}
+
+export async function clearQueue(): Promise<void> {
+  await writeQueue({ operations: [], lastAttemptAt: new Date().toISOString() });
 }

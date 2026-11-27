@@ -1,224 +1,184 @@
-/**
- * Toolbar popup for the extension.
- * Lightweight React shell using the existing app's CSS design tokens via Tailwind
- * config + the same color palette (ink/panel/line/hover/task/aya).
- */
+/** Toolbar popup: live KPIs, one-line quick add and the three main entry points. */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ayaServer } from '../lib/server';
-import { STORAGE_KEYS, DEFAULT_SETTINGS } from '../lib/core';
+import { enqueueOperation, queueStatus } from '../lib/queue';
+import { filterCounts, loadData, parseQuickAdd, createTask, NOTE_LABEL } from '../lib/tasks';
+import { applyTheme, loadTheme, saveTheme, watchTheme, type Theme } from '../lib/theme';
+import { getActiveTab, openSidePanel, openWebApp, sendToTab } from '../lib/browser';
 
 export default function Popup() {
-  const [status, setStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  const [theme, setTheme] = useState<Theme>('light');
+  const [online, setOnline] = useState<boolean | null>(null);
+  const [counts, setCounts] = useState({ all: 0, today: 0, inbox: 0, notes: 0, projects: 0 });
   const [unread, setUnread] = useState(0);
   const [queueCount, setQueueCount] = useState(0);
-  const [settings, setSettings] = useState<any>(null);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [quick, setQuick] = useState('');
+  const [mode, setMode] = useState<'task' | 'note'>('task');
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
 
-  const refresh = async () => {
-    const h = await ayaServer.health().catch(() => null);
-    setStatus(h ? 'online' : 'offline');
-    const qq = (await import('../lib/queue')).queueStatus();
-    qq.then((q) => setQueueCount(q.count));
-
-    await new Promise<void>((r) => setTimeout(r, 0));
-    const unreadLocal = await new Promise<number>((r) => chrome.storage.local.get([STORAGE_KEYS.UNREAD], (res: any) => { const v = res?.[STORAGE_KEYS.UNREAD] ?? 0; r(v); }));
-    const acts = await ayaServer.inboxUnread().catch(() => ({ items: [] } as any));
-    const delta = Math.min((acts?.items?.length ?? 0), 99);
-    setUnread(delta > 0 ? delta : unreadLocal);
-        const ss = await new Promise<any>((r) => chrome.storage.local.get([STORAGE_KEYS.SETTINGS], (res: any) => { const v = res?.[STORAGE_KEYS.SETTINGS] ?? DEFAULT_SETTINGS; r(v); }));
-    setSettings(ss);
-  };
-
-
-  useEffect(() => { refresh(); }, []);
-
-  const saveSettings = async (patch: any) => {
-    const merged = { ...settings, ...patch };
-    await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: merged });
-    setSettings(merged);
-    // invalidate cached config in background so next requests use new URL
-    await chrome.runtime.sendMessage({ type: 'aya-invalidate-config' }).catch(() => {});
-  };
-
-  const testConnection = async () => {
-    setTestResult('جاري الاختبار…');
+  const load = useCallback(async () => {
+    loadTheme().then((value) => {
+      setTheme(value);
+      applyTheme(value);
+    });
     try {
-      const h = await ayaServer.health();
-      setTestResult(`✅ متصل · ${h.name} · أداة آية: ${h.aya?.enabled ? 'مفعّلة' : 'غير مفعلة'} · ${h.tools} أداة`);
-    } catch (e: any) {
-      setTestResult(`❌ غير متصل: ${e?.status || e}`);
+      const data = await loadData();
+      setCounts(filterCounts(data));
+      setOnline(true);
+      const inbox = await ayaServer.inbox();
+      setUnread(inbox.items.filter((item) => (item.status ?? 'unread') === 'unread').length);
+    } catch {
+      setOnline(false);
+    }
+    const queue = await queueStatus();
+    setQueueCount(queue.count);
+  }, []);
+
+  useEffect(() => {
+    load();
+    watchTheme((value) => {
+      setTheme(value);
+      applyTheme(value);
+    });
+  }, [load]);
+
+  const toggleTheme = () => {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(next);
+    applyTheme(next);
+    saveTheme(next);
+  };
+
+  const add = async () => {
+    const raw = quick.trim();
+    if (!raw || saving) return;
+    setSaving(true);
+    setNotice('');
+    setError('');
+    const parsed = parseQuickAdd(raw);
+    const input = {
+      content: mode === 'note' ? `📝 ${parsed.content}` : parsed.content,
+      priority: parsed.priority,
+      dueDate: parsed.dueDate,
+      labelNames: mode === 'note' ? [NOTE_LABEL] : parsed.labels,
+    };
+    try {
+      await ayaServer.command('task.create', input);
+      setQuick('');
+      setNotice(mode === 'note' ? '📝 تم حفظ الملاحظة' : '✓ تمت إضافة المهمة');
+      setCounts((prev) => ({ ...prev, ...(mode === 'note' ? { notes: prev.notes + 1 } : { all: prev.all + 1 }) }));
+    } catch {
+      await enqueueOperation({ name: 'task.create', input, actor: 'user', confirmed: true });
+      setQuick('');
+      setQueueCount((prev) => prev + 1);
+      setNotice('📥 أوفلاين — اتخزنت في الطابور');
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleSideOptions = [
-    { value: 'right', label: 'يمين' },
-    { value: 'left', label: 'شمال' },
-    { value: 'hidden', label: 'مخفي' },
-  ] as const;
+  const openDrawer = async () => {
+    const tab = await getActiveTab();
+    if (tab?.id) {
+      const response = await sendToTab(tab.id, { type: 'aya-toggle-drawer' });
+      if (response) {
+        window.close();
+        return;
+      }
+    }
+    await openSidePanel();
+    window.close();
+  };
+
+  const openPanel = async () => {
+    await openSidePanel();
+    window.close();
+  };
 
   return (
-    <div style={{ width: 320, background: '#242424', color: '#fbfbfb', fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Tahoma, sans-serif', minHeight: 380 }}>
-      {/* Header */}
-      <div style={{ padding: '10px 12px', borderBottom: '1px solid #323232', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div style={{ width: 22, height: 22, borderRadius: 6, background: 'linear-gradient(135deg,#de4c4a,#8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 11 }}>آ</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>آية ✨</div>
-        </div>
-        <span style={{ fontSize: 10, color: status === 'online' ? '#8b5cf6' : '#ff8a82', fontWeight: 600 }}>
-          {status === 'online' ? 'متصل' : status === 'checking' ? 'جارٍ الفحص' : 'غير متصل'}
-        </span>
-      </div>
-
-      {/* Status row */}
-      <div style={{ padding: '10px 12px', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontSize: 11, color: '#9a9a9a' }}>
-          {(() => {
-            if (!settings) return 'جارٍ التحميل…';
-            const url = settings.serverBaseUrl;
-            const token = settings.bearerToken ? ' مع token' : '';
-            return `خادم·${url}${token}`;
-          })()}
-        </span>
-        {unread > 0 && (
-          <span style={{ fontSize: 11, color: '#de4c4a', fontWeight: 600 }}>
-            رسائل آية الجديدة: {unread}
-          </span>
-        )}
-        {queueCount > 0 && (
-          <span style={{ fontSize: 11, color: '#8b5cf6', fontWeight: 600 }}>
-            في قائمة الانتظار: {queueCount}
-          </span>
-        )}
-      </div>
-
-      {/* Quick actions */}
-      <div style={{ padding: '8px 12px 10px', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button
-          style={quickBtnStyle()}
-          onClick={() => {               chrome.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => { const t: any = tabs[0]; if (t?.id) chrome.tabs.sendMessage(t.id, { type: 'aya-toggle-drawer' }).catch(() => chrome.action.openPopup?.()); else chrome.action.openPopup?.(); }); }}
-        >
-          فتح بار آية
-        </button>
-        <button
-          style={quickBtnStyle()}
-          onClick={() => {               chrome.tabs.query({ active: true, currentWindow: true }, (tabs: any[]) => { const t: any = tabs[0]; if (t?.id) chrome.tabs.sendMessage(t.id, { type: 'aya-toggle-quick-add' }).catch(() => chrome.action.openPopup?.()); else chrome.action.openPopup?.(); }); }}
-        >
-          مهمة سريعة
-        </button>
-        <button
-            style={quickBtnStyle()}
-            onClick={() => {
-              chrome.windows.getLastFocused({}, (w: any) => {
-                chrome.sidePanel.open({ windowId: (w as any)?.id });
-              });
-            }}
-          >
-            اللوحة الجانبية
-          </button>
-        <button style={quickBtnStyle()} onClick={() => chrome.tabs.create({ url: 'http://127.0.0.1:5173/#/inbox' })}>
-          فتح النوتبوك
-        </button>
-      </div>
-
-      {/* Offline queue flush */}
-      {queueCount > 0 && (
-        <div style={{ padding: '0 12px 8px' }}>
-          <button
-            style={{ background: '#8b5cf6', color: '#fff', border: 'none', borderRadius: 8, padding: '6px 10px', fontSize: 11, cursor: 'pointer' }}
-            onClick={async () => {
-              const res = await (await import('../lib/queue')).flushQueue();
-              if (res.failed === 0) setQueueCount(0);
-              else setQueueCount(res.failed);
-            }}
-          >
-            مزامنة الآن ({queueCount})
-          </button>
-        </div>
-      )}
-
-      {/* Settings */}
-      <div style={{ borderTop: '1px solid #323232', padding: '10px 12px' }}>
-        <div style={{ fontSize: 10, color: '#9a9a9a', marginBottom: 6, letterSpacing: '.4px' }}>الإعدادات</div>
-
-        <div style={{ marginBottom: 8 }}>
-          <label style={{ display: 'block', fontSize: 10, color: '#9a9a9a', marginBottom: 3 }}>خادم الأساس</label>
-          <input
-            value={settings?.serverBaseUrl || ''}
-            onChange={(e) => saveSettings({ serverBaseUrl: e.target.value })}
-            style={{ width: '100%', background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 8, padding: '5px 7px', fontSize: 11 }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <label style={{ display: 'block', fontSize: 10, color: '#9a9a9a', marginBottom: 3 }}>
-            Bearer Token (اختياري لبورصات السحاب)
-          </label>
-          <input
-            type="password"
-            value={settings?.bearerToken || ''}
-            onChange={(e) => saveSettings({ bearerToken: e.target.value })}
-            placeholder="مثال: sk-…"
-            style={{ width: '100%', background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 8, padding: '5px 7px', fontSize: 11 }}
-          />
-        </div>
-
-        <div style={{ marginBottom: 8 }}>
-          <label style={{ display: 'block', fontSize: 10, color: '#9a9a9a', marginBottom: 3 }}>اللسان الجانبي</label>
-          <select
-            value={settings?.handleSide || 'right'}
-            onChange={(e) => saveSettings({ handleSide: e.target.value as any })}
-            style={{ width: '100%', background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 8, padding: '5px 7px', fontSize: 11 }}
-          >
-            {handleSideOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-
-        <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 11, color: '#fbfbfb' }}>شريط التحديد الطائر</span>
-          <input
-            type="checkbox"
-            checked={settings?.selectionPillEnabled !== false}
-            onChange={(e) => saveSettings({ selectionPillEnabled: e.target.checked })}
-            style={{ accentColor: '#de4c4a' }}
-          />
-        </div>
-
-        <button
-          style={{ width: '100%', background: '#1e1e1e', color: '#de4c4a', border: '1px solid #de4c4a', borderRadius: 8, padding: '6px 8px', fontSize: 11, cursor: 'pointer' }}
-          onClick={testConnection}
-        >
-          اختبار الاتصال
-        </button>
-
-        {testResult && (
-          <div style={{ marginTop: 6, fontSize: 11, color: testResult.startsWith('✅') ? '#8b5cf6' : testResult.startsWith('❌') ? '#ff8a82' : '#9a9a9a' }}>
-            {testResult}
+    <div className="popup">
+      <header className="popup-head">
+        <div className="popup-brand">
+          <div className="brand-mark">آ</div>
+          <div>
+            <div className="popup-title">آية · __AYAtodoist</div>
+            <div className="popup-sub">
+              <span className={`dot ${online === false ? 'dot-red' : online ? 'dot-green' : 'dot-gray'}`} />
+              {online === false ? 'أوفلاين' : online ? 'متصل' : 'جارٍ الفحص'}
+              {queueCount > 0 && <span>· {queueCount} بالطابور</span>}
+            </div>
           </div>
-        )}
+        </div>
+        <button className="hdr-btn" onClick={toggleTheme} title={theme === 'dark' ? 'الوضع الفاتح' : 'الوضع الداكن'}>
+          {theme === 'dark' ? '☀️' : '🌙'}
+        </button>
+      </header>
+
+      <div className="popup-body">
+        <div className="popup-kpis">
+          <div className="popup-kpi blue">
+            <div className="popup-kpi-value">{counts.today}</div>
+            <div className="popup-kpi-label">مهام اليوم</div>
+          </div>
+          <div className="popup-kpi">
+            <div className="popup-kpi-value">{counts.inbox}</div>
+            <div className="popup-kpi-label">الوارد</div>
+          </div>
+          <div className="popup-kpi red">
+            <div className="popup-kpi-value">{unread}</div>
+            <div className="popup-kpi-label">رسائل آية</div>
+          </div>
+        </div>
+
+        <div className="card popup-quick">
+          <div className="qa-row">
+            <input
+              className="input grow"
+              placeholder={mode === 'note' ? 'ملاحظة سريعة…' : 'مهمة سريعة… (p2 #عمل !today)'}
+              value={quick}
+              onChange={(event) => setQuick(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void add();
+              }}
+            />
+            <button className="btn btn-primary btn-sm" onClick={add} disabled={saving || !quick.trim()}>
+              {saving ? '…' : 'إضافة'}
+            </button>
+          </div>
+          <div className="row">
+            <div className="segmented">
+              <button className={mode === 'task' ? 'active' : ''} onClick={() => setMode('task')}>مهمة</button>
+              <button className={mode === 'note' ? 'active' : ''} onClick={() => setMode('note')}>ملاحظة</button>
+            </div>
+            <span className="text-xs muted">Enter للإضافة</span>
+          </div>
+        </div>
+
+        {notice && <div className="popup-toast">{notice}</div>}
+        {error && <div className="popup-toast err">{error}</div>}
+
+        <div className="popup-actions">
+          <button className="btn btn-blue" onClick={openPanel}>اللوحة الجانبية</button>
+          <button className="btn btn-purple" onClick={openDrawer}>بار آية العائم</button>
+          <button className="btn btn-ghost" onClick={() => openWebApp()} style={{ gridColumn: '1 / -1' }}>
+            فتح تطبيق الويب ↗
+          </button>
+        </div>
       </div>
 
-      {/* Footer */}
-      <div style={{ padding: '6px 12px', borderTop: '1px solid #323232', fontSize: 10, color: '#9a9a9a', textAlign: 'center' }}>
-        Ipv6-ready · Alt+A بار آية · Alt+Q مهمة سريعة
+      <div className="popup-foot">
+        <span>Alt+Shift+A بار آية · Alt+Q مهمة سريعة</span>
+        <button
+          className="mini-btn"
+          title="الإعدادات"
+          onClick={() => chrome.runtime.openOptionsPage?.()}
+        >
+          ⚙️
+        </button>
       </div>
     </div>
   );
-}
-
-function quickBtnStyle() {
-  return {
-    background: '#de4c4a',
-    color: '#fff',
-    border: 'none',
-    borderRadius: 10,
-    padding: '6px 10px',
-    fontSize: 11,
-    fontWeight: 600,
-    cursor: 'pointer',
-    flex: '1 1 auto',
-    minWidth: 80,
-  };
 }
