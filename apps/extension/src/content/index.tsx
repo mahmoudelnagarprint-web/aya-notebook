@@ -67,7 +67,8 @@ async function boot() {
   const host = document.createElement('div');
   host.id = HOST_ID;
   host.style.cssText = 'all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
-  document.documentElement.appendChild(host);
+  const mount = document.body ?? document.documentElement;
+  mount.appendChild(host);
 
   shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');

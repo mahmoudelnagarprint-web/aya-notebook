@@ -1,4 +1,4 @@
-import { AyaModelRouter, sanitizeToolHistory } from './router';
+import { AyaModelRouter } from './router';
 import { buildAyaSystemPrompt } from './persona';
 import type { AyaMessage } from '@ayatodoist/shared-types';
 import { DEFAULT_AYA_SETTINGS } from '@ayatodoist/shared-types';
@@ -57,6 +57,72 @@ export function selectAyaToolSpecs(catalogue: any[], query: string, history?: an
       ...tool,
       description: String(tool.description ?? '').slice(0, 160),
     }));
+}
+
+const BARE_ACK = /^(?:تم|حاضر|تمام|أوكي|اوكي|done|ok)\s*[.!]?$/i;
+
+/** True for the empty confirmations that made Aya look like a dumb bot. */
+export function isBareAck(text: string): boolean {
+  return BARE_ACK.test(String(text ?? '').replace(/[\u200f\u200e\s]+/g, ' ').trim());
+}
+
+interface ExecutedTool {
+  name: string;
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+function itemTitle(item: any): string | null {
+  if (item === null || typeof item !== 'object') return typeof item === 'string' ? item : null;
+  for (const key of ['content', 'title', 'name', 'text', 'label']) {
+    const value = item[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+/** Human-readable one-liner for a tool result, used when narration is unavailable. */
+export function describeToolResult(result: unknown): string {
+  if (result === null || result === undefined) return 'بدون نتيجة';
+  if (typeof result === 'string') return result.replace(/\s+/g, ' ').trim().slice(0, 400) || 'بدون نتيجة';
+  if (typeof result === 'number' || typeof result === 'boolean') return String(result);
+  if (Array.isArray(result)) {
+    if (!result.length) return 'مفيش نتائج';
+    const titles = result.slice(0, 6).map(itemTitle).filter((value): value is string => Boolean(value));
+    return `${result.length} عنصر${titles.length ? `: ${titles.join(' · ')}` : ''}`;
+  }
+  if (typeof result === 'object') {
+    const record = result as Record<string, unknown>;
+    for (const key of ['tasks', 'items', 'results', 'data', 'models', 'projects', 'memories']) {
+      const value = record[key];
+      if (Array.isArray(value)) return `${value.length} في ${key} — ${describeToolResult(value)}`;
+    }
+    return JSON.stringify(result).slice(0, 400);
+  }
+  return String(result);
+}
+
+/** Deterministic, readable summary of everything the tools returned. */
+export function fallbackNarration(executed: ExecutedTool[]): string {
+  if (!executed.length) return 'محتاجة توضيح أكتر عشان أقدر أساعدك صح.';
+  const lines = executed.map((entry) =>
+    entry.ok
+      ? `- ${entry.name}: ${describeToolResult(entry.result)}`
+      : `- ${entry.name}: فشل — ${entry.error ?? 'خطأ غير معروف'}`,
+  );
+  const failed = executed.some((entry) => !entry.ok);
+  return `${failed ? 'في خطوة محصلتش:' : 'اللي نفذته:'}\n${lines.join('\n')}`;
+}
+
+/** The exact JSON payload of this turn's tool results, given to the narrator. */
+export function toolResultsNotice(executed: ExecutedTool[]): string {
+  const payload = executed.map((entry) => ({
+    tool: entry.name,
+    ok: entry.ok,
+    ...(entry.ok ? { result: entry.result } : { error: entry.error ?? 'فشل' }),
+  }));
+  return `نتائج الأدوات المنفذة الآن (JSON):\n${JSON.stringify(payload, null, 2)}`;
 }
 
 function nowIso(): string {
@@ -190,63 +256,55 @@ export class AyaBrain {
     let model = first.model;
     let modelRowId = first.modelRowId;
     const toolCalls: any[] = first.toolCalls ?? [];
-    const executed: Array<{ name: string; ok: boolean; result?: unknown; error?: string }> = [];
+    const executed: ExecutedTool[] = [];
 
     if (toolCalls.length) {
       batchId = newId('batch');
-      const toolRows: any[] = [];
       for (const call of toolCalls) {
         onEvent?.({ type: 'tool_start', name: call.name, toolCallId: call.id, batchId });
         try {
           const result = await this.kernel.execute(call.name, call.args ?? {}, { actor: 'ai', batchId });
           executed.push({ name: call.name, ok: true, result });
-          toolRows.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: JSON.stringify(result) });
           onEvent?.({ type: 'tool_result', toolCallId: call.id, name: call.name, ok: true, batchId });
         } catch (error) {
           const message = (error as Error).message;
           executed.push({ name: call.name, ok: false, error: message });
-          toolRows.push({ role: 'tool', toolCallId: call.id, toolName: call.name, content: `Error: ${message}` });
           onEvent?.({ type: 'tool_result', toolCallId: call.id, name: call.name, ok: false, error: message, batchId });
         }
       }
 
-      const liveHistory = sanitizeToolHistory([
+      // Always narrate through a clean, tool-free completion: the executed
+      // results are handed back as data, so the model reads them instead of
+      // echoing a bare confirmation.
+      const narrationMessages = [
         ...baseMessages,
-        { role: 'assistant', content: first.text, toolCalls },
-        ...toolRows,
-      ]);
+        {
+          role: 'user',
+          content: [
+            toolResultsNotice(executed),
+            '',
+            'اقرئي النتائج دي كويس وردّي على آخر طلب للمستخدم من واقعها: لو سأل «فين؟» أو «إيه اللي تم؟» اشرحي المحتوى الفعلي (أسماء المهام، العدد، الحالة)، وممنوع تردّي بـ«تم.» لوحدها.',
+          ].join('\n'),
+        },
+      ];
 
       try {
-        const narrated = await this.chat({ routing, messages: liveHistory, system, tools: selectedTools, preferred: modelId });
-        assistantText = narrated.text;
+        const narrated = await this.chat({ routing, messages: narrationMessages, system, preferred: modelId });
+        const narratedText = String(narrated.text ?? '').trim();
+        if (narratedText && !isBareAck(narratedText)) {
+          assistantText = narratedText;
+        } else {
+          assistantText = fallbackNarration(executed);
+        }
         failover = failover || Boolean(narrated.failover);
         model = narrated.model ?? model;
         modelRowId = narrated.modelRowId ?? modelRowId;
       } catch {
-        // Second attempt: a clean, tool-free transcript. This is what survives
-        // providers that reject raw tool_calls history.
-        const plain = [
-          { role: 'user', content: text },
-          {
-            role: 'assistant',
-            content: `(تم تنفيذ الأدوات: ${executed.map((entry) => entry.name).join('، ')})`,
-          },
-          { role: 'user', content: 'اكتبي تأكيدًا عربيًا قصيرًا لما تم تنفيذه فقط.' },
-        ];
-        try {
-          const narrated = await this.chat({ routing, messages: plain, system, preferred: modelId });
-          assistantText = narrated.text;
-          failover = failover || Boolean(narrated.failover);
-        } catch {
-          const lines = executed.map(
-            (entry) => `- ${entry.name}${entry.ok ? ' ✅' : ` ❌ (${entry.error ?? 'فشل'})`}`,
-          );
-          assistantText = `تم تنفيذ الإجراءات بنجاح:\n${lines.join('\n')}`;
-        }
+        assistantText = fallbackNarration(executed);
       }
     }
 
-    if (!assistantText) assistantText = 'تم.';
+    if (!assistantText || isBareAck(assistantText)) assistantText = fallbackNarration(executed);
 
     onEvent?.({ type: 'delta', content: assistantText });
 

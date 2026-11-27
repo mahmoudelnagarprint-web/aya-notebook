@@ -26,10 +26,14 @@ const MENU = {
 
 /* ------------------------------------------------------------- bootstrap */
 
-await ensureStorage();
-buildContextMenus();
-startupAlarms();
-void refreshBadge();
+// No top-level await: MV3 service workers reject it. Listeners below still
+// register synchronously, and bootstrap finishes on its own microtask.
+void (async () => {
+  await ensureStorage();
+  buildContextMenus();
+  startupAlarms();
+  await refreshBadge();
+})();
 
 /* ---------------------------------------------------------- context menus */
 
@@ -261,6 +265,20 @@ async function requestPageText(tabId: number | undefined): Promise<{ text: strin
   });
 }
 
+/**
+ * A data URL is decoded locally: `fetch(dataUrl)` violates the extension's
+ * `connect-src` CSP and throws in the service worker.
+ */
+function dataUrlToBlob(dataUrl: string): Blob {
+  const match = /^data:([^;,]+)?(;base64)?,([\s\S]*)$/.exec(String(dataUrl ?? ''));
+  if (!match) throw new Error('صيغة الملف غير صالحة');
+  const type = match[1] || 'application/octet-stream';
+  const raw = match[2] ? atob(match[3] ?? '') : decodeURIComponent(match[3] ?? '');
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) bytes[index] = raw.charCodeAt(index);
+  return new Blob([bytes], { type });
+}
+
 async function uploadRemoteImage(srcUrl: string, tabId: number | undefined) {
   try {
     const response = await fetch(srcUrl);
@@ -460,8 +478,8 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: (val
             else resolve(url);
           });
         });
-        const blob = await (await fetch(dataUrl)).blob();
-        const file = new File([blob], 'screenshot.png', { type: 'image/png' });
+        const blob = dataUrlToBlob(dataUrl);
+        const file = new File([blob], 'screenshot.png', { type: blob.type || 'image/png' });
         const upload = await ayaServer.upload(file, 'screenshot.png');
         sendResponse({ ok: true, id: upload.filename, url: upload.absoluteUrl, dataUrl });
       } catch (err) {
@@ -566,7 +584,7 @@ chrome.runtime.onMessage.addListener((msg: any, _sender: any, sendResponse: (val
   if (msg.type === 'aya-upload-dataurl') {
     void (async () => {
       try {
-        const blob = await (await fetch(String(msg.dataUrl))).blob();
+        const blob = dataUrlToBlob(String(msg.dataUrl));
         const file = new File([blob], String(msg.name || 'image.png'), { type: blob.type || 'image/png' });
         const upload = await ayaServer.upload(file, file.name);
         sendResponse({ ok: true, url: upload.absoluteUrl, kind: upload.kind });

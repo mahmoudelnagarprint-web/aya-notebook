@@ -1,6 +1,7 @@
 import type { Kernel } from '@ayatodoist/core-kernel';
 import type { AyaModel, AyaSettings } from '@ayatodoist/shared-types';
 import type { SqliteAyaStore } from '@ayatodoist/database';
+import type { FetchedModel } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 import { cleanApiKey, fetchProviderModels, normalizeBaseUrl, probeModel, redactSecret } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 
 export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai';
@@ -277,19 +278,66 @@ export class AyaService {
       fetchImpl: this.fetchImpl,
     });
 
+    const probed = this.saveDiscoveredModels(providerId, discovered);
+    return { models: this.adapter.listModels(providerId), latencyMs, probed };
+  }
+
+  /** Discovers the catalogue without saving anything, for the model picker. */
+  async previewModels(providerId: string): Promise<{
+    providerId: string;
+    models: Array<FetchedModel & { exists: boolean }>;
+    latencyMs: number;
+  }> {
+    const provider = this.adapter.listProviders().find((entry) => entry.id === providerId);
+    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+
+    const { models: discovered, latencyMs } = await fetchProviderModels({
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey ?? '',
+      fetchImpl: this.fetchImpl,
+    });
+    const existing = new Set(this.adapter.listModels(providerId).map((model) => model.modelId));
+    return {
+      providerId,
+      models: discovered.map((entry) => ({ ...entry, exists: existing.has(entry.modelId) })),
+      latencyMs,
+    };
+  }
+
+  /** Saves only the models the picker selected. */
+  async addModels(providerId: string, entries: FetchedModel[]): Promise<{ providerId: string; added: number; models: any[] }> {
+    const provider = this.adapter.listProviders().find((entry) => entry.id === providerId);
+    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+    const added = this.saveDiscoveredModels(providerId, Array.isArray(entries) ? entries : []);
+    return { providerId, added, models: this.adapter.listModels(providerId) };
+  }
+
+  /** Deletes every failed or disabled model of one provider in a single call. */
+  async deleteFailedModels(providerId: string): Promise<{ providerId: string; deleted: number; models: any[] }> {
+    const provider = this.adapter.listProviders().find((entry) => entry.id === providerId);
+    if (!provider) throw new Error(`Unknown provider: ${providerId}`);
+    const broken = this.adapter.listModels(providerId).filter((model) => model.status === 'failed' || model.enabled === false);
+    for (const model of broken) this.adapter.deleteModel(model.id);
+    return { providerId, deleted: broken.length, models: this.adapter.listModels(providerId) };
+  }
+
+  private saveDiscoveredModels(providerId: string, entries: FetchedModel[]): number {
     const existing = this.adapter.listModels(providerId);
+    const known = new Set(existing.map((model) => model.modelId));
     let priority = existing.reduce((max, model) => Math.max(max, Number(model.priority ?? 0)), 0);
-    let probed = 0;
-    for (const entry of discovered) {
-      if (existing.some((model) => model.modelId === entry.modelId)) continue;
+    let added = 0;
+    for (const entry of entries) {
+      const modelId = String(entry?.modelId ?? '').trim();
+      if (!modelId || known.has(modelId)) continue;
+      known.add(modelId);
       priority += 1;
       this.adapter.saveModel({
-        id: `${providerId}_${entry.modelId}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) + `_${Math.random().toString(36).slice(2, 6)}`,
+        id: `${providerId}_${modelId}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80) + `_${Math.random().toString(36).slice(2, 6)}`,
         providerId,
-        modelId: entry.modelId,
-        label: entry.label || entry.modelId,
-        contextWindow: entry.contextWindow,
-        vision: entry.vision,
+        modelId,
+        label: entry.label || modelId,
+        contextWindow: entry.contextWindow ?? null,
+        vision: Boolean(entry.vision),
         priority,
         failover: true,
         enabled: true,
@@ -298,10 +346,9 @@ export class AyaService {
         lastTestedAt: null,
         createdAt: new Date().toISOString(),
       });
-      probed += 1;
+      added += 1;
     }
-
-    return { models: this.adapter.listModels(providerId), latencyMs, probed };
+    return added;
   }
 
   async listProviders(): Promise<any[]> {

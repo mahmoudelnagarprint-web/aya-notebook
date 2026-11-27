@@ -183,11 +183,26 @@ export function createAyaApi({ kernel, store, service }: AyaApiDeps) {
     return c.json({ ok: true });
   });
 
-  /** Imports the provider catalogue and returns the saved model rows. */
+  /**
+   * Imports the provider catalogue and returns the saved model rows. With
+   * `{ preview: true }` it only discovers them so the UI can show a picker.
+   */
   app.post('/providers/:id/fetch-models', async (c) => {
+    const body = await readBody(c);
+    if (body.preview === true) return c.json(await service.previewModels(c.req.param('id')));
     const result = await service.fetchModels(c.req.param('id'));
     return c.json(result);
   });
+
+  /** Saves only the models chosen in the picker. */
+  app.post('/providers/:id/models/bulk', async (c) => {
+    const body = await readBody(c);
+    const entries = Array.isArray(body.models) ? body.models : [];
+    return c.json(await service.addModels(c.req.param('id'), entries));
+  });
+
+  /** One-click cleanup of every failed / disabled model of a provider. */
+  app.delete('/providers/:id/failed-models', async (c) => c.json(await service.deleteFailedModels(c.req.param('id'))));
 
   app.post('/providers/:id/models', async (c) => {
     const body = await readBody(c);

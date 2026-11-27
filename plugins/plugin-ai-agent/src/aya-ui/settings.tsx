@@ -3,7 +3,7 @@ import type { AyaChannelRecord, AyaMemory, AyaMemoryCategory, AyaModel, AyaProvi
 import { AYA_MEMORY_CATEGORIES, AYA_MEMORY_CATEGORY_LABELS, AYA_ROLES, AYA_ROLE_LABELS } from '@ayatodoist/shared-types';
 import { useLanguage } from '@ayatodoist/plugin-sdk/react';
 import { Button, Card, Icon, Pill, Select, TextArea, TextField, Toggle, cn } from '@ayatodoist/plugin-sdk/ui';
-import { AyaApiError, ayaApi } from '../aya-client';
+import { AyaApiError, ayaApi, type AyaFetchedModel } from '../aya-client';
 
 const PRESETS = [
   { id: 'gemini', label: 'Google Gemini', name: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai' },
@@ -40,7 +40,15 @@ function Block({ title, subtitle, icon, children, action }: { title: string; sub
 
 /* ------------------------------------------------------------- providers */
 
-function ProviderForm({ onCreated, onError }: { onCreated: () => void; onError: (value: string) => void }) {
+function ProviderForm({
+  onCreated,
+  onError,
+  onPickModels,
+}: {
+  onCreated: () => void;
+  onError: (value: string) => void;
+  onPickModels?: (provider: { id: string; name: string }) => void;
+}) {
   const language = useLanguage();
   const [preset, setPreset] = useState<string>('gemini');
   const [name, setName] = useState('Google Gemini');
@@ -63,12 +71,9 @@ function ProviderForm({ onCreated, onError }: { onCreated: () => void; onError: 
     try {
       const created = await ayaApi.addProvider({ name: name.trim(), baseUrl: baseUrl.trim(), apiKey: apiKey.trim() });
       setApiKey('');
-      try {
-        await ayaApi.fetchModels(created.provider.id);
-      } catch (cause) {
-        onError(message(cause));
-      }
       onCreated();
+      // Nothing is imported automatically: the picker decides what gets saved.
+      if (created.provider?.id) onPickModels?.({ id: created.provider.id, name: created.provider.name });
     } catch (cause) {
       onError(message(cause));
     } finally {
@@ -178,6 +183,208 @@ function ModelRow({ model, onChanged, onError }: { model: AyaModel; onChanged: (
   );
 }
 
+/* ----------------------------------------------------------- model picker */
+
+const NON_CHAT_MODEL = /(tts|transcribe|live|lyria|imagen|embedding|robotics|veo|aqa)/i;
+
+function isSmartChatModel(model: { modelId: string }): boolean {
+  return !NON_CHAT_MODEL.test(String(model.modelId ?? ''));
+}
+
+function contextBadge(value: number | null): string | null {
+  if (!value) return null;
+  return value >= 1_000_000 ? `${Math.round(value / 100_000) / 10}M` : `${Math.max(1, Math.round(value / 1000))}K`;
+}
+
+function ModelPickerModal({
+  provider,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  provider: { id: string; name: string };
+  onClose: () => void;
+  onSaved: () => void;
+  onError: (value: string) => void;
+}) {
+  const language = useLanguage();
+  const [models, setModels] = useState<AyaFetchedModel[]>([]);
+  const [query, setQuery] = useState('');
+  const [chatOnly, setChatOnly] = useState(true);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    void ayaApi
+      .previewModels(provider.id)
+      .then((result) => {
+        if (!alive) return;
+        setModels(result.models);
+        const initial: Record<string, boolean> = {};
+        for (const model of result.models) {
+          if (!model.exists && isSmartChatModel(model)) initial[model.modelId] = true;
+        }
+        setSelected(initial);
+      })
+      .catch((cause) => onError(message(cause)))
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [provider.id]);
+
+  const visible = models.filter((model) => {
+    if (chatOnly && !isSmartChatModel(model)) return false;
+    const needle = query.trim().toLowerCase();
+    if (!needle) return true;
+    return `${model.modelId} ${model.label ?? ''}`.toLowerCase().includes(needle);
+  });
+  const chosen = models.filter((model) => selected[model.modelId] && !model.exists);
+
+  const toggleAll = (value: boolean) => {
+    setSelected((current) => {
+      const next = { ...current };
+      for (const model of visible) {
+        if (model.exists) continue;
+        next[model.modelId] = value;
+      }
+      return next;
+    });
+  };
+
+  const save = async () => {
+    if (!chosen.length) return;
+    setSaving(true);
+    try {
+      await ayaApi.addModels(provider.id, chosen);
+      onSaved();
+      onClose();
+    } catch (cause) {
+      onError(message(cause));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/45 p-4" role="dialog" aria-modal="true" aria-label="اختيار النماذج">
+      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-[14px] bg-white shadow-2xl dark:bg-slate-900">
+        <div className="flex items-start justify-between gap-2 border-b border-[#eef2f7] px-4 py-3 dark:border-slate-800">
+          <div>
+            <p className="text-[13px] font-bold text-slate-800 dark:text-slate-100">
+              {language === 'ar' ? 'اختيار النماذج المراد إضافتها' : 'Pick models to import'}
+            </p>
+            <p className="text-[10.5px] text-slate-400">
+              {provider.name} · {models.length} {language === 'ar' ? 'نموذج متاح' : 'models available'}
+            </p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="إغلاق" className="text-slate-400 hover:text-slate-700 dark:hover:text-slate-200">
+            <Icon name="close" size={15} />
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#eef2f7] px-4 py-2.5 dark:border-slate-800">
+          <TextField
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={language === 'ar' ? 'بحث بالاسم…' : 'Search models…'}
+            className="h-8 min-w-[140px] flex-1"
+            dir="ltr"
+          />
+          <button
+            type="button"
+            onClick={() => setChatOnly((current) => !current)}
+            className={cn(
+              'rounded-full border px-2.5 py-1 text-[10.5px] font-bold transition-colors',
+              chatOnly
+                ? 'border-[#1e78ff] bg-blue-50 text-[#1e78ff] dark:bg-blue-500/10'
+                : 'border-[#e2e8f0] text-slate-500 dark:border-slate-700 dark:text-slate-300',
+            )}
+          >
+            {language === 'ar' ? 'نماذج الشات الذكية فقط' : 'Smart chat models only'}
+          </button>
+          <button type="button" onClick={() => toggleAll(true)} className="text-[10.5px] font-semibold text-[#1e78ff]">
+            {language === 'ar' ? 'تحديد الكل' : 'Select all'}
+          </button>
+          <button type="button" onClick={() => toggleAll(false)} className="text-[10.5px] font-semibold text-slate-400 hover:text-slate-600">
+            {language === 'ar' ? 'إلغاء الكل' : 'Clear'}
+          </button>
+        </div>
+
+        <div className="min-h-[120px] flex-1 overflow-y-auto px-4 py-2">
+          {loading ? (
+            <p className="py-6 text-center text-[11.5px] text-slate-400">{language === 'ar' ? 'جارٍ سحب النماذج من المفتاح…' : 'Fetching models…'}</p>
+          ) : visible.length === 0 ? (
+            <p className="py-6 text-center text-[11.5px] text-slate-400">
+              {language === 'ar' ? 'مفيش نماذج مطابقة — جرّبي إظهار كل النماذج.' : 'No matching models.'}
+            </p>
+          ) : (
+            visible.map((model) => {
+              const context = contextBadge(model.contextWindow);
+              return (
+                <label
+                  key={model.modelId}
+                  className={cn(
+                    'flex cursor-pointer items-center gap-2 rounded-[7px] px-1.5 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/50',
+                    model.exists ? 'opacity-55' : '',
+                  )}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(selected[model.modelId])}
+                    disabled={model.exists}
+                    onChange={(event) => setSelected((current) => ({ ...current, [model.modelId]: event.target.checked }))}
+                    className="h-3.5 w-3.5 shrink-0 accent-[#1e78ff]"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[11.5px] font-semibold text-slate-700 dark:text-slate-200" dir="ltr">
+                      {model.modelId}
+                    </p>
+                    {model.label && model.label !== model.modelId ? (
+                      <p className="truncate text-[10px] text-slate-400">{model.label}</p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 items-center gap-1">
+                    <Pill tone={isSmartChatModel(model) ? 'blue' : 'slate'}>{isSmartChatModel(model) ? (language === 'ar' ? 'شات' : 'chat') : language === 'ar' ? 'متخصص' : 'special'}</Pill>
+                    {model.vision ? <Pill tone="purple">{language === 'ar' ? 'رؤية' : 'vision'}</Pill> : null}
+                    {context ? <Pill tone="slate">{context}</Pill> : null}
+                    {model.exists ? <span className="text-[9.5px] text-slate-400">{language === 'ar' ? 'مضاف' : 'added'}</span> : null}
+                  </div>
+                </label>
+              );
+            })
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 border-t border-[#eef2f7] px-4 py-3 dark:border-slate-800">
+          <span className="text-[10.5px] text-slate-400">
+            {language === 'ar' ? `مختار ${chosen.length} من ${visible.filter((model) => !model.exists).length}` : `${chosen.length} selected`}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="soft" className="h-8" onClick={onClose}>
+              {language === 'ar' ? 'إلغاء' : 'Cancel'}
+            </Button>
+            <Button variant="primary" icon="plus" className="h-8" disabled={saving || chosen.length === 0} onClick={() => void save()}>
+              {saving
+                ? language === 'ar'
+                  ? 'جارٍ الإضافة…'
+                  : 'Adding…'
+                : language === 'ar'
+                  ? `إضافة النماذج المختارة (${chosen.length})`
+                  : `Add selected (${chosen.length})`}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ panel */
 
 export function AyaSettingsPanel() {
@@ -196,6 +403,8 @@ export function AyaSettingsPanel() {
   const [testingAll, setTestingAll] = useState<Record<string, boolean>>({});
   const [healthBusy, setHealthBusy] = useState(false);
   const [healthNote, setHealthNote] = useState<string | null>(null);
+  const [picker, setPicker] = useState<{ id: string; name: string } | null>(null);
+  const [deletingFailed, setDeletingFailed] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -255,6 +464,22 @@ export function AyaSettingsPanel() {
       setError(message(cause));
     } finally {
       setTestingAll((current) => ({ ...current, [providerId]: false }));
+    }
+  };
+
+  const deleteBrokenModels = async (providerId: string) => {
+    setDeletingFailed((current) => ({ ...current, [providerId]: true }));
+    try {
+      const result = await ayaApi.deleteFailedModels(providerId);
+      setHealthNote(
+        language === 'ar' ? `اتحذف ${result.deleted} نموذج معطل` : `Deleted ${result.deleted} broken models`,
+      );
+      setError(null);
+      await load();
+    } catch (cause) {
+      setError(message(cause));
+    } finally {
+      setDeletingFailed((current) => ({ ...current, [providerId]: false }));
     }
   };
 
@@ -343,7 +568,9 @@ export function AyaSettingsPanel() {
             </p>
           ) : null}
 
-          {config?.providers.map((provider: AyaProvider & { models: AyaModel[] }) => (
+          {config?.providers.map((provider: AyaProvider & { models: AyaModel[] }) => {
+            const brokenCount = provider.models.filter((model) => model.status === 'failed' || !model.enabled).length;
+            return (
             <div key={provider.id} className="rounded-[10px] border border-[#e2e8f0] p-3 dark:border-slate-700">
               <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -378,11 +605,28 @@ export function AyaSettingsPanel() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void ayaApi.fetchModels(provider.id).then(() => load()).catch((cause) => setError(message(cause)))}
+                    onClick={() => setPicker({ id: provider.id, name: provider.name })}
                     className="rounded-[6px] border border-[#e2e8f0] px-2 py-1 text-[10.5px] font-semibold text-slate-600 hover:border-[#1e78ff] hover:text-[#1e78ff] dark:border-slate-700 dark:text-slate-300"
                   >
-                    {language === 'ar' ? 'جلب واختبار' : 'Fetch & test'}
+                    {language === 'ar' ? 'سحب النماذج من المفتاح' : 'Fetch models'}
                   </button>
+                  {brokenCount > 0 ? (
+                    <button
+                      type="button"
+                      disabled={deletingFailed[provider.id]}
+                      onClick={() => void deleteBrokenModels(provider.id)}
+                      className="inline-flex items-center gap-1 rounded-[6px] border border-rose-300 px-2 py-1 text-[10.5px] font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-500/40 dark:text-rose-300 dark:hover:bg-rose-500/10"
+                    >
+                      <Icon name="trash" size={11} />
+                      {deletingFailed[provider.id]
+                        ? language === 'ar'
+                          ? 'جارٍ الحذف…'
+                          : 'Deleting…'
+                        : language === 'ar'
+                          ? `حذف النماذج المعطلة (${brokenCount})`
+                          : `Delete broken (${brokenCount})`}
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     aria-label="حذف المزوّد"
@@ -404,9 +648,10 @@ export function AyaSettingsPanel() {
                 )}
               </div>
             </div>
-          ))}
+            );
+          })}
 
-          <ProviderForm onCreated={() => void load()} onError={setError} />
+          <ProviderForm onCreated={() => void load()} onError={setError} onPickModels={(provider) => setPicker(provider)} />
         </div>
       </Block>
 
@@ -619,6 +864,15 @@ export function AyaSettingsPanel() {
           })}
         </div>
       </Block>
+
+      {picker ? (
+        <ModelPickerModal
+          provider={picker}
+          onClose={() => setPicker(null)}
+          onSaved={() => void load()}
+          onError={setError}
+        />
+      ) : null}
     </div>
   );
 }

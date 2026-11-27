@@ -106,6 +106,9 @@ export function buildAyaSystemPrompt(options: SystemPromptOptions): string {
     'The workspace snapshot above is live. Do NOT call workspace.list, project.list, core.system.overview, or core.system.clock — the answer is already here.',
   );
   lines.push('نفّذي الأدوات مباشرة عند الحاجة، واذكري ما تم تنفيذه بإيجاز.');
+  lines.push(
+    'بعد تنفيذ أي أداة اقرئي نتيجتها واشرحيها للمستخدم بالتفصيل المفيد (الأسماء والأرقام والحالة). ممنوع تمامًا الرد بـ«تم.» أو أي تأكيد فارغ عندما يسأل المستخدم عن نتيجة أو محتوى.',
+  );
 
   return lines.join('\n');
 }

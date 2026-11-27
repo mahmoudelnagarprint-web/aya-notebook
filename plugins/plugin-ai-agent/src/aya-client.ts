@@ -159,6 +159,14 @@ function parseSseBlock(block: string): { event: string; data: string } | null {
   return { event, data: data.join('\n') };
 }
 
+export interface AyaFetchedModel {
+  modelId: string;
+  label: string;
+  contextWindow: number | null;
+  vision: boolean;
+  exists?: boolean;
+}
+
 export interface UploadedFile {
   filename: string;
   content_type: string;
@@ -181,6 +189,21 @@ export const ayaApi = {
     request<{ models: AyaModel[]; latencyMs: number; probed: number }>(`/api/aya/providers/${encodeURIComponent(id)}/fetch-models`, {
       method: 'POST',
     }),
+  previewModels: (id: string) =>
+    request<{ providerId: string; models: AyaFetchedModel[]; latencyMs: number }>(
+      `/api/aya/providers/${encodeURIComponent(id)}/fetch-models`,
+      { method: 'POST', body: { preview: true } },
+    ),
+  addModels: (providerId: string, models: AyaFetchedModel[]) =>
+    request<{ providerId: string; added: number; models: AyaModel[] }>(
+      `/api/aya/providers/${encodeURIComponent(providerId)}/models/bulk`,
+      { method: 'POST', body: { models } },
+    ),
+  deleteFailedModels: (providerId: string) =>
+    request<{ providerId: string; deleted: number; models: AyaModel[] }>(
+      `/api/aya/providers/${encodeURIComponent(providerId)}/failed-models`,
+      { method: 'DELETE' },
+    ),
   addModel: (providerId: string, input: { modelId: string; label?: string; vision?: boolean }) =>
     request<{ model: AyaModel }>(`/api/aya/providers/${encodeURIComponent(providerId)}/models`, { method: 'POST', body: input }),
   updateModel: (id: string, patch: Partial<{ failover: boolean; enabled: boolean; priority: number; vision: boolean; label: string }>) =>

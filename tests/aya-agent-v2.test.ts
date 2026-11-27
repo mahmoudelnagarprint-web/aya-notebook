@@ -661,7 +661,7 @@ describe('Aya v2 — live workspace snapshot in system prompt', () => {
 });
 
 describe('Aya v2 — graceful fallback when narration fails after tools succeed', () => {
-  test('emits the Egyptian Arabic confirmation listing succeeded actions', async () => {
+  test('summarises the tool results instead of a bare «تم.»', async () => {
     await store.saveProvider(provider('p1', 'http://localhost:9999/v1', 'Local Mock'));
     await store.saveModel(model({ id: 'm1', providerId: 'p1', modelId: 'mock-model', contextWindow: 128_000, priority: 1 }));
     await store.saveRouting({ chat_deep: 'm1', background_24_7: 'm1', vision: 'm1', memory_summarizer: 'm1' });
@@ -681,8 +681,72 @@ describe('Aya v2 — graceful fallback when narration fails after tools succeed'
     const brain = new AyaBrain({ kernel, adapter: store });
     const turn = await brain.handleMessage({ text: 'اعملي مهمة', language: 'ar' });
     const assistant = turn.messages.find((m) => m.role === 'assistant')!;
-    expect(assistant.content).toContain('تم تنفيذ الإجراءات بنجاح');
+    expect(assistant.content).toContain('اللي نفذته');
     expect(assistant.content).toContain('task.create');
+    expect(assistant.content).toContain('مهمة');
+    expect(assistant.content.trim()).not.toBe('تم.');
+  });
+
+  test('task.list is narrated from the real task rows, never a bare acknowledgement', async () => {
+    await store.saveProvider(provider('p1', 'http://localhost:9999/v1', 'Local Mock'));
+    await store.saveModel(model({ id: 'm1', providerId: 'p1', modelId: 'mock-model', contextWindow: 128_000, priority: 1 }));
+    await store.saveRouting({ chat_deep: 'm1', background_24_7: 'm1', vision: 'm1', memory_summarizer: 'm1' });
+    await store.saveSettings({ ...DEFAULT_AYA_SETTINGS, autonomy: 'full_undo' });
+    await kernel.execute('project.ensureInbox', {});
+    await kernel.execute('task.create', { content: 'تقرير التسويق' });
+    await kernel.execute('task.create', { content: 'مكالمة العميل' });
+
+    const bodies: Array<Record<string, any>> = [];
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, any>);
+      if (bodies.length === 1) {
+        return jsonResponse({
+          choices: [{ message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'task__list', arguments: '{}' } }] } }],
+        });
+      }
+      return jsonResponse({ choices: [{ message: { content: 'عندك تقرير التسويق ومكالمة العميل.' } }] });
+    }) as unknown as typeof fetch;
+
+    const brain = new AyaBrain({ kernel, adapter: store });
+    const turn = await brain.handleMessage({ text: 'إيه اللي عندي؟', language: 'ar' });
+
+    expect(bodies).toHaveLength(2);
+    const narration = bodies[1]!;
+    expect(narration.tools).toBeUndefined();
+    const messages = narration.messages as Array<{ role: string }>;
+    expect(messages.some((entry) => entry.role === 'tool')).toBe(false);
+    expect(JSON.stringify(messages)).toContain('نتائج الأدوات المنفذة الآن');
+    expect(JSON.stringify(messages)).toContain('تقرير التسويق');
+    expect(JSON.stringify(messages)).toContain('مكالمة العميل');
+    const assistant = turn.messages.find((entry) => entry.role === 'assistant')!;
+    expect(assistant.content).toContain('تقرير التسويق');
+    expect(assistant.content).not.toBe('تم.');
+  });
+
+  test('an unexpected bare «تم.» from the model is replaced by the real summary', async () => {
+    await store.saveProvider(provider('p1', 'http://localhost:9999/v1', 'Local Mock'));
+    await store.saveModel(model({ id: 'm1', providerId: 'p1', modelId: 'mock-model', contextWindow: 128_000, priority: 1 }));
+    await store.saveRouting({ chat_deep: 'm1', background_24_7: 'm1', vision: 'm1', memory_summarizer: 'm1' });
+    await store.saveSettings({ ...DEFAULT_AYA_SETTINGS, autonomy: 'full_undo' });
+    await kernel.execute('project.ensureInbox', {});
+    await kernel.execute('task.create', { content: 'مهمة المتابعة' });
+
+    let callCount = 0;
+    globalThis.fetch = (async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return jsonResponse({
+          choices: [{ message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'task__list', arguments: '{}' } }] } }],
+        });
+      }
+      return jsonResponse({ choices: [{ message: { content: 'تم.' } }] });
+    }) as unknown as typeof fetch;
+
+    const brain = new AyaBrain({ kernel, adapter: store });
+    const turn = await brain.handleMessage({ text: 'إيه اللي عندي؟', language: 'ar' });
+    const assistant = turn.messages.find((entry) => entry.role === 'assistant')!;
+    expect(assistant.content).not.toBe('تم.');
+    expect(assistant.content).toContain('مهمة المتابعة');
   });
 });
 
@@ -736,34 +800,33 @@ describe('Aya v2 — Gemini thought_signature via the native Google provider', (
   });
 });
 
-describe('Aya v2 — post-tool narration fallback uses a clean plain-text transcript', () => {
-  test('the fallback call carries no tool schemas and no raw tool_calls history', async () => {
+describe('Aya v2 — post-tool narration always uses a clean tool-free transcript', () => {
+  test('the narration call carries no tool schemas and no raw tool_calls history', async () => {
     await store.saveProvider(provider('p1', 'http://localhost:9999/v1', 'Local Mock'));
     await store.saveModel(model({ id: 'm1', providerId: 'p1', modelId: 'mock-model', contextWindow: 128_000, priority: 1 }));
     await store.saveRouting({ chat_deep: 'm1', background_24_7: 'm1', vision: 'm1', memory_summarizer: 'm1' });
     await store.saveSettings({ ...DEFAULT_AYA_SETTINGS, autonomy: 'full_undo' });
     await kernel.execute('project.ensureInbox', {});
 
-    const bodies: Array<Record<string, unknown>> = [];
+    const bodies: Array<Record<string, any>> = [];
     globalThis.fetch = (async (_url: string, init?: RequestInit) => {
-      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, any>);
       if (bodies.length === 1) {
         return jsonResponse({ choices: [{ message: { content: '', tool_calls: [{ id: 'c1', function: { name: 'task__create', arguments: JSON.stringify({ content: 'مهمة' }) } }] } }] });
       }
-      // The multi-step call with tool history explodes, exactly like Gemini's 400.
-      if (bodies.length === 2) return new Response('missing thought_signature', { status: 400 });
       return jsonResponse({ choices: [{ message: { content: 'اتعملت المهمة يا فندم ✅' } }] });
     }) as unknown as typeof fetch;
 
     const brain = new AyaBrain({ kernel, adapter: store });
     const turn = await brain.handleMessage({ text: 'اعملي مهمة اسمها مهمة', language: 'ar' });
 
-    expect(bodies).toHaveLength(3);
-    const narration = bodies[2]!;
+    expect(bodies).toHaveLength(2);
+    const narration = bodies[1]!;
     expect(narration.tools).toBeUndefined();
     const messages = narration.messages as Array<{ role: string; tool_calls?: unknown }>;
     expect(messages.some((entry) => entry.role === 'tool')).toBe(false);
     expect(messages.some((entry) => entry.tool_calls !== undefined)).toBe(false);
+    expect(JSON.stringify(messages)).toContain('نتائج الأدوات المنفذة الآن');
     expect(JSON.stringify(messages)).toContain('task.create');
     expect(JSON.stringify(messages)).toContain('اعملي مهمة اسمها مهمة');
     expect(turn.messages.find((entry) => entry.role === 'assistant')!.content).toBe('اتعملت المهمة يا فندم ✅');
