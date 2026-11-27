@@ -42,6 +42,12 @@ const LONG_HINT = /(1m|1\.0m|128k|200k|256k|long|gemini|glm|deepseek|minimax|fla
 const NON_CHAT =
   /(lyria|imagen|veo|embedding|aqa|transcribe|tts|robotics|text-to-speech|speech-to-text|image[-_ ]?generation|video[-_ ]?generation)/i;
 
+/**
+ * Cheap `lite`/`nano` variants answer fast but drop multi-step tool calls, so
+ * they must never win the `chat_deep` slot while a full Flash/Pro model exists.
+ */
+const TOOL_WEAK = /(?:flash[-_. ]?lite|nano|lite|tiny|haiku)/i;
+
 export function isChatModel(model: AyaModel): boolean {
   return !NON_CHAT.test(`${model.modelId} ${model.label}`);
 }
@@ -125,16 +131,19 @@ const WEIGHTS: Record<AyaRole, { strength: number; speed: number; vision: number
 
 function roleScore(role: AyaRole, features: Features): number {
   const weights = WEIGHTS[role];
+  // Tool calling is the hardest requirement of the deep chat slot; lite models
+  // hallucinate tool execution instead of emitting real function calls.
+  const weakTools = role === 'chat_deep' && TOOL_WEAK.test(features.id);
   // A small, explicit preference for the Gemini chat families the user relies
   // on. It breaks near-ties without overriding a genuinely stronger model.
-  const geminiBonus = GEMINI_PREFERRED[role].test(features.id) ? GEMINI_BONUS[role] : 0;
+  const geminiBonus = !weakTools && GEMINI_PREFERRED[role].test(features.id) ? GEMINI_BONUS[role] : 0;
   return (
     weights.strength * features.strength +
     weights.speed * features.speed +
     weights.vision * features.vision +
     weights.long * features.longContext +
     features.availability +
-    geminiBonus
+    geminiBonus - (weakTools ? 9 : 0)
   );
 }
 

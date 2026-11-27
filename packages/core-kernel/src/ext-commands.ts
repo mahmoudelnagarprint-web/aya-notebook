@@ -73,6 +73,10 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
         .string()
         .optional()
         .describe('Id of an existing project from the Projects list in the system prompt. Omit only when no project fits; the task then lands in Inbox.'),
+      projectName: z
+        .string()
+        .optional()
+        .describe('Project name as the user said it (e.g. "البيت"). Matched case/whitespace-insensitively and created automatically when missing. Prefer this when you only know the name.'),
       sectionId: z.string().nullable().optional(),
       labelNames: z
         .array(z.string())
@@ -115,10 +119,20 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     handler: (input: any, ctx: CommandContext) => {
       const store = ctx.store;
       const now = ctx.now();
-      const today = ctx.today();
+      const projectId = resolveProjectId(store, ctx, input.projectId, input.projectName);
+      const duplicate = findRecentDuplicate(store, input.content, input.dueDate ?? null, input.dueTime ?? null, now);
+      if (duplicate) {
+        return {
+          id: duplicate.id,
+          projectId: duplicate.projectId,
+          projectName: projectDisplayName(store, duplicate.projectId),
+          content: duplicate.content,
+          labels: duplicate.labels ?? [],
+          deduplicated: true,
+        };
+      }
       const id = ctx.id('task');
       const orderKey = input.orderKey ?? defaultOrderKey(store);
-      const projectId = input.projectId ?? ensureInboxId(store, ctx);
       const labels = resolveLabels(store, input.labelNames ?? []);
       const rule = normalizeRecurrence(input.recurrence ?? null);
       const task = TaskSchema.parse({
@@ -158,7 +172,13 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
       for (const labelId of labels) {
         store.upsert('labels', store.get('labels', labelId) ?? { id: labelId, name: labelId, color: '#246fe0', orderKey: defaultOrderKey(store), isFavorite: false, createdAt: now, updatedAt: now });
       }
-      return { id: task.id, projectId: task.projectId, content: task.content, labels: task.labels };
+      return {
+        id: task.id,
+        projectId: task.projectId,
+        projectName: projectDisplayName(store, task.projectId),
+        content: task.content,
+        labels: task.labels,
+      };
     },
   },
   {
@@ -182,10 +202,16 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     category: 'tasks',
     title: 'Update a task',
     titleAr: 'تعديل مهمة',
-    description: 'Updates the given task by id, preserving fields not provided.',
+    description:
+      'Updates the given task by id, preserving fields not provided. Optionally moves it to another project by id or by name (the project is created when the name does not exist).',
     input: z.object({
       id: z.string().min(1),
       content: z.string().optional(),
+      projectId: z.string().optional().describe('Id of an existing project to move the task into.'),
+      projectName: z
+        .string()
+        .optional()
+        .describe('Project name to move the task into; matched case/whitespace-insensitively and created automatically when missing.'),
       priority: z.number().int().min(1).max(4).optional(),
       dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
       dueTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).nullable().optional(),
@@ -199,6 +225,10 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
       if (!task) throw new Error(`Unknown task: ${input.id}`);
       const now = ctx.now();
       const updated: any = { ...task, updatedAt: now };
+      if (input.projectId != null || input.projectName != null) {
+        updated.projectId = resolveProjectId(store, ctx, input.projectId, input.projectName);
+        updated.sectionId = null;
+      }
       if (input.content != null) updated.content = input.content;
       if (input.priority != null) updated.priority = input.priority;
       if (input.dueDate !== undefined) updated.dueDate = input.dueDate;
@@ -210,7 +240,12 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
         updated.completedAt = input.completed ? now : null;
       }
       store.upsert('tasks', updated);
-      return { id: updated.id, updatedAt: updated.updatedAt };
+      return {
+        id: updated.id,
+        projectId: updated.projectId,
+        projectName: projectDisplayName(store, updated.projectId),
+        updatedAt: updated.updatedAt,
+      };
     },
   },
   {
@@ -466,6 +501,90 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     },
   },
 ];
+
+/** Case/whitespace-insensitive project name key, used for every lookup. */
+function normalizeName(value: unknown): string {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+}
+
+function projectDisplayName(store: DataStore, projectId: string | null | undefined): string | null {
+  if (!projectId) return null;
+  const project = store.get('projects', projectId) as any;
+  return project ? String(project.nameAr || project.name || '') || null : null;
+}
+
+/**
+ * Resolves a project by id, then by name (case/whitespace-insensitive), and
+ * creates it when the user named a project that does not exist yet. Falls back
+ * to Inbox when neither an id nor a name was given.
+ */
+function resolveProjectId(
+  store: DataStore,
+  ctx: CommandContext,
+  projectId?: string | null,
+  projectName?: string | null,
+): string {
+  if (projectId) {
+    const byId = store.get('projects', projectId) as any;
+    if (byId) return byId.id;
+  }
+  const name = String(projectName ?? '').replace(/\s+/g, ' ').trim();
+  if (name) {
+    const wanted = normalizeName(name);
+    const existing = (store.list('projects') as any[]).find(
+      (project) =>
+        project &&
+        !project.isArchived &&
+        (normalizeName(project.name) === wanted || normalizeName(project.nameAr) === wanted),
+    );
+    if (existing) return existing.id;
+    const now = ctx.now();
+    const created = ProjectSchema.parse({
+      id: ctx.id('project'),
+      name,
+      color: '#246fe0',
+      parentId: null,
+      orderKey: defaultOrderKey(store),
+      isFavorite: false,
+      isArchived: false,
+      isInbox: false,
+      layout: 'list',
+      createdAt: now,
+      updatedAt: now,
+    });
+    store.upsert('projects', created);
+    return created.id;
+  }
+  return ensureInboxId(store, ctx);
+}
+
+const DUPLICATE_WINDOW_MS = 60_000;
+
+/**
+ * Rapid identical creates (same title + due date + due time within 60 seconds)
+ * are the same intent retried by the model, so the existing row is returned.
+ */
+function findRecentDuplicate(
+  store: DataStore,
+  content: unknown,
+  dueDate: string | null,
+  dueTime: string | null,
+  now: string,
+): any | null {
+  const wanted = normalizeName(content);
+  if (!wanted) return null;
+  const at = Date.parse(now);
+  for (const task of store.list('tasks') as any[]) {
+    if (!task || task.deletedAt) continue;
+    if (normalizeName(task.content) !== wanted) continue;
+    if ((task.dueDate ?? null) !== (dueDate ?? null)) continue;
+    if ((task.dueTime ?? null) !== (dueTime ?? null)) continue;
+    const created = Date.parse(task.createdAt);
+    if (Number.isNaN(created) || Number.isNaN(at)) continue;
+    if (Math.abs(at - created) <= DUPLICATE_WINDOW_MS) return task;
+  }
+  return null;
+}
 
 function ensureInboxId(store: DataStore, ctx: CommandContext): string {
   let project = store.get('projects', '__inbox') as any;

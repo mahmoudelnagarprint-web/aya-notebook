@@ -26,6 +26,8 @@ interface ChatOptions {
   tools?: any[];
   /** Explicit model chosen by the user for this turn; always tried first. */
   preferred?: string;
+  /** `required` forces the provider to emit a real tool call (anti-hallucination retry). */
+  toolChoice?: 'auto' | 'required';
 }
 
 function toOpenAiTool(tool: any) {
@@ -83,6 +85,7 @@ export class AyaModelRouter {
 
   async chat(opts: ChatOptions): Promise<any> {
     const { role, routing, models, providers, messages, system, tools, preferred } = opts;
+    const forceTool = opts.toolChoice === 'required' && Boolean(tools?.length);
     const pool = this.pool(role, routing, preferred);
     const fetchImpl = this.fetchImpl ?? globalThis.fetch;
     const attempts: RouterAttempt[] = [];
@@ -111,6 +114,7 @@ export class AyaModelRouter {
             })),
           systemInstruction: system ? { parts: [{ text: system }] } : undefined,
           tools: tools && tools.length ? [{ functionDeclarations: tools.map(toGeminiTool) }] : undefined,
+          toolConfig: forceTool ? { functionCallingConfig: { mode: 'ANY' } } : undefined,
         };
       } else {
         url = `${baseUrl}/chat/completions`;
@@ -138,6 +142,7 @@ export class AyaModelRouter {
           }),
           system: system || undefined,
           tools: tools && tools.length ? tools.map(toOpenAiTool) : undefined,
+          tool_choice: forceTool ? 'required' : undefined,
         };
       }
 

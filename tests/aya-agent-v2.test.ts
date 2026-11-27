@@ -620,7 +620,7 @@ describe('Aya v2 — compact tool selection', () => {
     expect(selected.some((tool) => tool.originalName === 'filter.create')).toBe(false);
   });
 
-  test('tools already used in the conversation stay available and descriptions are compacted', () => {
+  test('tools already used in the conversation stay available with intact schemas', () => {
     const history = [
       {
         ...message('conv', 1, 'assistant', ''),
@@ -629,7 +629,8 @@ describe('Aya v2 — compact tool selection', () => {
     ];
     const selected = selectAyaToolSpecs(catalogue, 'كملي', history);
     expect(selected.some((tool) => tool.originalName === 'view.setLayout')).toBe(true);
-    for (const tool of selected) expect(tool.description.length).toBeLessThanOrEqual(160);
+    // Schemas/descriptions are never truncated: shallow calls are worse than tokens.
+    for (const tool of selected) expect(tool.description).toBe(catalogue.find((entry) => entry.originalName === tool.originalName)!.description);
   });
 });
 
@@ -656,7 +657,7 @@ describe('Aya v2 — live workspace snapshot in system prompt', () => {
     expect(prompt).toContain('عاجل');
     expect(prompt).toContain('مهمة اختبار 1');
     expect(prompt).toContain('الآن');
-    expect(prompt).toContain('Do NOT call workspace.list, project.list, core.system.overview, or core.system.clock');
+    expect(prompt).toContain('لا تستدعي project.list أو workspace.list لمجرد إعادة قراءة بيانات موجودة في اللقطة');
   });
 });
 
@@ -681,8 +682,8 @@ describe('Aya v2 — graceful fallback when narration fails after tools succeed'
     const brain = new AyaBrain({ kernel, adapter: store });
     const turn = await brain.handleMessage({ text: 'اعملي مهمة', language: 'ar' });
     const assistant = turn.messages.find((m) => m.role === 'assistant')!;
-    expect(assistant.content).toContain('اللي نفذته');
-    expect(assistant.content).toContain('task.create');
+    expect(assistant.content).toContain('خلصت الخطوات دي');
+    expect(assistant.content).toContain('إنشاء المهمة');
     expect(assistant.content).toContain('مهمة');
     expect(assistant.content.trim()).not.toBe('تم.');
   });
@@ -710,12 +711,13 @@ describe('Aya v2 — graceful fallback when narration fails after tools succeed'
     const brain = new AyaBrain({ kernel, adapter: store });
     const turn = await brain.handleMessage({ text: 'إيه اللي عندي؟', language: 'ar' });
 
-    expect(bodies).toHaveLength(2);
-    const narration = bodies[1]!;
+    // tool round → model continues → clean narration call
+    expect(bodies).toHaveLength(3);
+    const narration = bodies[2]!;
     expect(narration.tools).toBeUndefined();
     const messages = narration.messages as Array<{ role: string }>;
     expect(messages.some((entry) => entry.role === 'tool')).toBe(false);
-    expect(JSON.stringify(messages)).toContain('نتائج الأدوات المنفذة الآن');
+    expect(JSON.stringify(messages)).toContain('نتائج التنفيذ');
     expect(JSON.stringify(messages)).toContain('تقرير التسويق');
     expect(JSON.stringify(messages)).toContain('مكالمة العميل');
     const assistant = turn.messages.find((entry) => entry.role === 'assistant')!;
@@ -820,13 +822,13 @@ describe('Aya v2 — post-tool narration always uses a clean tool-free transcrip
     const brain = new AyaBrain({ kernel, adapter: store });
     const turn = await brain.handleMessage({ text: 'اعملي مهمة اسمها مهمة', language: 'ar' });
 
-    expect(bodies).toHaveLength(2);
-    const narration = bodies[1]!;
+    expect(bodies).toHaveLength(3);
+    const narration = bodies[2]!;
     expect(narration.tools).toBeUndefined();
     const messages = narration.messages as Array<{ role: string; tool_calls?: unknown }>;
     expect(messages.some((entry) => entry.role === 'tool')).toBe(false);
     expect(messages.some((entry) => entry.tool_calls !== undefined)).toBe(false);
-    expect(JSON.stringify(messages)).toContain('نتائج الأدوات المنفذة الآن');
+    expect(JSON.stringify(messages)).toContain('نتائج التنفيذ');
     expect(JSON.stringify(messages)).toContain('task.create');
     expect(JSON.stringify(messages)).toContain('اعملي مهمة اسمها مهمة');
     expect(turn.messages.find((entry) => entry.role === 'assistant')!.content).toBe('اتعملت المهمة يا فندم ✅');
@@ -902,8 +904,8 @@ describe('Aya v2 — poisoned history: stored tool calls never break a turn', ()
     expect(llm).toHaveLength(4);
     expect(llm.every((entry) => entry.toolCalls === undefined)).toBe(true);
     expect(llm.some((entry) => entry.role === 'tool')).toBe(false);
-    expect(llm[1]!.content).toBe('رد 2\n\n[الأدوات المنفذة سابقاً: task.create]');
-    expect(llm[3]!.content).toContain('[الأدوات المنفذة سابقاً: task.update، task.complete]');
+    expect(llm[1]!.content).toBe('رد 2\n\n[إجراءات سابقة: task.create]');
+    expect(llm[3]!.content).toContain('[إجراءات سابقة: task.update، task.complete]');
   });
 
   test('the router degrades an orphaned tool call to text instead of sending it', () => {
@@ -960,7 +962,7 @@ describe('Aya v2 — poisoned history: stored tool calls never break a turn', ()
     const openAiBody = requests[0]!.body;
     expect((openAiBody.messages as Array<{ role: string; tool_calls?: unknown }>).some((entry) => entry.role === 'tool')).toBe(false);
     expect((openAiBody.messages as Array<{ tool_calls?: unknown }>).some((entry) => entry.tool_calls !== undefined)).toBe(false);
-    expect(JSON.stringify(openAiBody.messages)).toContain('الأدوات المنفذة سابقاً');
+    expect(JSON.stringify(openAiBody.messages)).toContain('إجراءات سابقة');
 
     const geminiTurn = await brain.handleMessage({ conversationId, text: 'وكمان؟', language: 'ar', modelId: 'gm' });
     expect(geminiTurn.error).toBeUndefined();
@@ -1084,10 +1086,10 @@ describe('Aya v2 — live clock and workspace context in the system prompt', () 
     expect(prompt).toContain('prj_work');
     expect(prompt).toContain('المنزل');
     expect(prompt).toContain('lbl_home');
-    expect(prompt).toContain('dueDate (YYYY-MM-DD)');
-    expect(prompt).toContain('ممنوع تمامًا كتابة JSON خام');
+    expect(prompt).toContain('dueDate يجب أن يكون YYYY-MM-DD');
+    expect(prompt).toContain('ممنوع تماماً إظهار JSON');
 
-    const contextIndex = prompt.indexOf('السياق الحيّ');
+    const contextIndex = prompt.indexOf('السياق الحي');
     const personaIndex = prompt.indexOf('أنتِ آية');
     expect(contextIndex).toBeGreaterThan(-1);
     expect(contextIndex).toBeLessThan(personaIndex);
