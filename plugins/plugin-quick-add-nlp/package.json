@@ -1,0 +1,21 @@
+{
+  "name": "@ayatodoist/plugin-quick-add-nlp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./parser": "./src/parser.ts",
+    "./ui": "./src/ui.tsx"
+  },
+  "dependencies": {
+    "@ayatodoist/plugin-sdk": "workspace:*",
+    "@ayatodoist/shared-types": "workspace:*",
+    "@tiptap/core": "^2.11.0",
+    "@tiptap/react": "^2.11.0",
+    "@tiptap/starter-kit": "^2.11.0",
+    "react": "^18.3.1",
+    "zod": "^3.24.1"
+  }
+}

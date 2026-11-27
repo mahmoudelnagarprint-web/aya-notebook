@@ -1,0 +1,25 @@
+{
+  "name": "@ayatodoist/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5173 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --port 4173"
+  },
+  "dependencies": {
+    "@ayatodoist/core-kernel": "workspace:*",
+    "@ayatodoist/plugin-sdk": "workspace:*",
+    "@ayatodoist/shared-types": "workspace:*",
+    "@ayatodoist/plugin-tasks-core": "workspace:*",
+    "@ayatodoist/plugin-quick-add-nlp": "workspace:*",
+    "@ayatodoist/plugin-views-layouts": "workspace:*",
+    "@ayatodoist/plugin-filters-labels": "workspace:*",
+    "@ayatodoist/plugin-reporting": "workspace:*",
+    "@ayatodoist/plugin-ai-agent": "workspace:*",
+    "@ayatodoist/plugin-checklists-media": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

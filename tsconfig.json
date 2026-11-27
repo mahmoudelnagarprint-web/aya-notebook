@@ -1,0 +1,114 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUncheckedIndexedAccess": false,
+    "types": [
+      "node"
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@ayatodoist/shared-types": [
+        "packages/shared-types/src/index.ts"
+      ],
+      "@ayatodoist/core-kernel": [
+        "packages/core-kernel/src/index.ts"
+      ],
+      "@ayatodoist/plugin-sdk": [
+        "packages/plugin-sdk/src/index.ts"
+      ],
+      "@ayatodoist/plugin-sdk/react": [
+        "packages/plugin-sdk/src/react.tsx"
+      ],
+      "@ayatodoist/plugin-sdk/ui": [
+        "packages/plugin-sdk/src/ui.tsx"
+      ],
+      "@ayatodoist/database": [
+        "packages/database/src/index.ts"
+      ],
+      "@ayatodoist/plugin-tasks-core": [
+        "plugins/plugin-tasks-core/src/index.ts"
+      ],
+      "@ayatodoist/plugin-tasks-core/ui": [
+        "plugins/plugin-tasks-core/src/ui/index.ts"
+      ],
+      "@ayatodoist/plugin-quick-add-nlp": [
+        "plugins/plugin-quick-add-nlp/src/index.ts"
+      ],
+      "@ayatodoist/plugin-quick-add-nlp/ui": [
+        "plugins/plugin-quick-add-nlp/src/ui.tsx"
+      ],
+      "@ayatodoist/plugin-quick-add-nlp/parser": [
+        "plugins/plugin-quick-add-nlp/src/parser.ts"
+      ],
+      "@ayatodoist/plugin-views-layouts": [
+        "plugins/plugin-views-layouts/src/index.ts"
+      ],
+      "@ayatodoist/plugin-views-layouts/ui": [
+        "plugins/plugin-views-layouts/src/ui.tsx"
+      ],
+      "@ayatodoist/plugin-filters-labels": [
+        "plugins/plugin-filters-labels/src/index.ts"
+      ],
+      "@ayatodoist/plugin-filters-labels/ui": [
+        "plugins/plugin-filters-labels/src/ui.tsx"
+      ],
+      "@ayatodoist/plugin-reporting": [
+        "plugins/plugin-reporting/src/index.ts"
+      ],
+      "@ayatodoist/plugin-reporting/ui": [
+        "plugins/plugin-reporting/src/ui.tsx"
+      ],
+      "@ayatodoist/plugin-ai-agent": [
+        "plugins/plugin-ai-agent/src/index.ts"
+      ],
+      "@ayatodoist/plugin-ai-agent/ui": [
+        "plugins/plugin-ai-agent/src/ui.tsx"
+      ],
+      "@ayatodoist/plugin-checklists-media": [
+        "plugins/plugin-checklists-media/src/index.ts",
+        "plugins/plugin-checklists-media/src/index.tsx"
+      ],
+      "@ayatodoist/plugin-checklists-media/ui": [
+        "plugins/plugin-checklists-media/src/ui.tsx",
+        "plugins/plugin-checklists-media/src/ui/index.ts"
+      ],
+      "@ayatodoist/plugin-ai-agent/engine": [
+        "plugins/plugin-ai-agent/src/engine.ts"
+      ]
+    }
+  },
+  "include": [
+    "packages/**/*.ts",
+    "packages/**/*.tsx",
+    "plugins/**/*.ts",
+    "plugins/**/*.tsx",
+    "apps/web/src/**/*.ts",
+    "apps/web/src/**/*.tsx",
+    "apps/server/src/**/*.ts",
+    "apps/desktop/src/**/*.ts",
+    "apps/web/vite.config.ts",
+    "apps/web/tailwind.config.ts",
+    "apps/extension/src/**/*.ts",
+    "apps/extension/src/**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "**/dist/**",
+    "**/node_modules/**"
+  ]
+}

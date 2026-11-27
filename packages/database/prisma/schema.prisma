@@ -1,0 +1,171 @@
+// __AYAtodoist — self-hosted data model.
+// SQLite by default (local-first, WAL); switch provider to "postgresql" for a server deployment.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  id         String   @id
+  name       String
+  color      String   @default("#dc4c3e")
+  parentId   String?
+  orderKey   String
+  isFavorite Boolean  @default(false)
+  isArchived Boolean  @default(false)
+  isInbox    Boolean  @default(false)
+  layout     String   @default("list")
+  createdAt  String
+  updatedAt  String
+
+  tasks    Task[]
+  sections Section[]
+
+  @@index([parentId])
+  @@index([orderKey])
+}
+
+model Section {
+  id          String  @id
+  projectId   String
+  name        String
+  orderKey    String
+  isCollapsed Boolean @default(false)
+  createdAt   String
+  updatedAt   String
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks   Task[]
+
+  @@index([projectId])
+}
+
+model Task {
+  id              String   @id
+  projectId       String
+  sectionId       String?
+  parentId        String?
+  content         String
+  description     String   @default("")
+  priority        Int      @default(4)
+  orderKey        String
+  dueDate         String?
+  dueTime         String?
+  deadline        String?
+  durationMinutes Int?
+  recurrence      String?
+  labels          String   @default("[]")
+  checklist       String   @default("[]")
+  attachments     String   @default("[]")
+  isCompleted     Boolean  @default(false)
+  completedAt     String?
+  createdAt       String
+  updatedAt       String
+  completedCount  Int      @default(0)
+  postponedCount  Int      @default(0)
+  deletedAt       String?
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  section   Section?   @relation(fields: [sectionId], references: [id], onDelete: SetNull)
+  comments  Comment[]
+  reminders Reminder[]
+
+  @@index([projectId])
+  @@index([sectionId])
+  @@index([parentId])
+  @@index([dueDate])
+}
+
+model Label {
+  id         String  @id
+  name       String
+  color      String  @default("#246fe0")
+  orderKey   String
+  isFavorite Boolean @default(false)
+  createdAt  String
+  updatedAt  String
+}
+
+model Filter {
+  id         String  @id
+  name       String
+  query      String
+  color      String  @default("#692ec2")
+  orderKey   String
+  isFavorite Boolean @default(false)
+  createdAt  String
+  updatedAt  String
+}
+
+model Comment {
+  id        String @id
+  taskId    String
+  content   String
+  author    String @default("user")
+  createdAt String
+  updatedAt String
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model Reminder {
+  id        String @id
+  taskId    String
+  at        String
+  text      String @default("")
+  createdAt String
+
+  task Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model Activity {
+  id           String  @id
+  actor        String
+  command      String
+  commandTitle String  @default("")
+  summary      String
+  input        String?
+  patches      String  @default("[]")
+  affected     String  @default("[]")
+  undoable     Boolean @default(true)
+  undone       Boolean @default(false)
+  batchId      String?
+  createdAt    String
+
+  @@index([createdAt])
+  @@index([actor])
+}
+
+model Goal {
+  id           String  @id
+  dailyGoal    Int     @default(5)
+  weeklyGoal   Int     @default(30)
+  vacationMode Boolean @default(false)
+  updatedAt    String
+}
+
+model PluginState {
+  id          String  @id
+  enabled     Boolean @default(true)
+  installedAt String
+}
+
+model Setting {
+  id        String @id
+  payload   String
+  updatedAt String
+}
+
+model Device {
+  clientId  String   @id
+  cursor    String
+  updatedAt String
+}

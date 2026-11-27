@@ -1,0 +1,60 @@
+{
+  "name": "__ayatodoist",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plugin-first, AI-agent-native, Arabic-RTL Todoist-grade notebook platform",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "plugins/*",
+    "apps/*",
+    "apps/extension"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/web dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "dev:server": "bun run --cwd apps/server dev",
+    "dev:desktop": "bun run --cwd apps/desktop dev",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/extension/tsconfig.json --noEmit",
+    "build": "bun run --cwd apps/web build && bun run --cwd apps/server build && bun run --cwd apps/extension build",
+    "test": "bun test",
+    "db:generate": "bun run --cwd packages/database generate",
+    "db:push": "bun run --cwd packages/database push",
+    "db:seed": "bun run --cwd packages/database seed"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^4.0.127",
+    "@ai-sdk/openai-compatible": "^3.0.95",
+    "@hono/node-server": "^1.13.7",
+    "@prisma/client": "^6.2.1",
+    "@tiptap/core": "^2.11.0",
+    "@tiptap/pm": "^2.11.0",
+    "@tiptap/react": "^2.11.0",
+    "@tiptap/starter-kit": "^2.11.0",
+    "ai": "^7.0.182",
+    "hono": "^4.6.16",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-virtuoso": "^4.12.3",
+    "zod": "^3.24.1",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^33.2.0",
+    "playwright": "^1.65.1",
+    "postcss": "^8.4.49",
+    "prisma": "^6.2.1",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7",
+    "ws": "^8.18.0"
+  }
+}

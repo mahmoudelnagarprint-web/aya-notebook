@@ -1,0 +1,16 @@
+{
+  "name": "@ayatodoist/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Clean-room Electron desktop shell for __AYAtodoist",
+  "type": "module",
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "bun build src/main.ts --outfile dist/main.cjs --target node --format cjs --external electron && bun build src/preload.ts --outfile dist/preload.cjs --target node --format cjs --external electron",
+    "dev": "bun run build && electron .",
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

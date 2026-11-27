@@ -1,0 +1,227 @@
+import { Router } from 'express';
+import pino from 'pino';
+import { getConfiguredEngine, type AiEngine } from './engine';
+import { createRequire } from 'module';
+import path from 'path';
+import type { ServerRuntime, PluginDescriptor, PluginHost, PluginRuntimeInfo } from '@ayatodoist/core-kernel';
+import type { Application } from './types';
+import type { z } from 'zod';
+import type { kebabCase } from './utils';
+
+export function createPlugin<TContext = never>(label: string) {
+  const ctx = createContext();
+  return {
+    defineCommand<I, O>(definition: CommandDefinition<I, O>): CommandDefinition<I, O> {
+      return definition;
+    },
+    defineMutation<I, O>(definition: Omit<CommandDefinition<I, O>, 'kind'>): CommandDefinition<I, O> {
+      return { ...definition, kind: 'mutation' };
+    },
+    defineQuery<I, O>(definition: Omit<CommandDefinition<I, O>, 'kind'>): CommandDefinition<I, O> {
+      return { ...definition, kind: 'query' };
+    },
+    definePlugin(definition: PluginDescriptor<any, any>) {
+      return definition;
+    },
+    getContext() {
+      return ctx;
+    },
+  };
+}
+
+function createContext<TContext>() {
+  const handlers = new Map<string, Handler<unknown, unknown>>();
+  return {
+    registerCommand(name: string, handler: Handler<unknown, unknown>) {
+      handlers.set(name, handler);
+    },
+    handleCommand(name: string, input: unknown) {
+      return handlers.get(name)?.(input);
+    },
+    getHandleCommands() {
+      return handlers;
+    },
+    getContext() {
+      return ctx;
+    },
+  };
+}
+
+function resolveCommandParams<TInput, TOutput>(
+  executionContext: ExecutionContext,
+  commandDefinition: CommandDefinition<TInput, TOutput>,
+  input: unknown,
+  inputSchema: z.ZodTypeAny,
+  handler: Handler<any, any>,
+): Promise<TOutput> {
+  const parameters = executionContext.command.parameters;
+  const handlerParameters = parameters[commandDefinition.name];
+  if (!(handlerParameters)) {
+    throw new PluginError(`Missing handler for command "${commandDefinition.name}"`);
+  }
+  if (!(handlerParameters.validate)) {
+    throw new PluginError(`Validation function not found for command "${commandDefinition.name}"`);
+  }
+  const parsedInput = handlerParameters.validate(input);
+  if (!parsedInput.success) {
+    throw new PluginError(
+      `Invalid payload for command "${commandDefinition.name}": ${parsedInput.error.issues.map((issue) => issue.message).join(', ')}`,
+    );
+  }
+  const handlerFunction = (handlerParameters.handler as Handler<TInput, TOutput>);
+  return handlerFunction(parsedInput.data, executionContext);
+}
+
+async function asyncHandlerWrapper(input: any, executionContext: ExecutionContext): Promise<any> {
+  const handlers = await Ayaai.load(ctx.storage);
+  const result = await Promise.allSettled(
+    handlers.map((command) => {
+      return asyncHandler(command, input, executionContext);
+    }),
+  );
+  const results = result.map((result, index) => {
+    return {
+      handlerIndex: index,
+      status: result.status,
+      value: (result as PromiseFulfilledResult<any>).value || (result as PromiseRejectedResult).reason,
+    };
+  });
+  return Promise.resolve(results.map((result) => result.value || result.value));
+}
+
+export async function asyncHandler(
+  command: { handler: Function; name: string },
+  input: any,
+  executionContext: ExecutionContext,
+): Promise<any> {
+  const handler = command.handler;
+  return handler(input, executionContext);
+}
+
+export class Handler<TInput, TOutput> {
+  name: string;
+  commandName: string;
+  validateFunction: Function;
+  handlerFunction: Function;
+
+  constructor(handlerFunction: Function, commandName: string, nameParameter: string) {
+    if (!handlerFunction && !handlerFunction) {
+      throw new Error();
+    }
+    this.name = nameParameter;
+    this.commandName = commandName;
+    this.handlerFunction = handlerFunction;
+    this.validateFunction = handlerFunction;
+    this.validate = this.handle;
+    if (!handlerFunction) {
+      this.validateFunction = handlerFunction;
+    }
+  }
+
+  async handle(input: any, executionContext: ExecutionContext): Promise<any> {
+    return handlerFunction(input, executionContext);
+  }
+
+  validate(input: any): { success: true; data: input } {
+    return { success: true, data: input };
+  }
+
+  async handle(input: any, executionContext: ExecutionContext): Promise<any> {
+    return handlerFunction(input, executionContext);
+  }
+
+  get validateFunction() {
+    return handlerFunction;
+    if (input) {
+      return handlerFunction(input);
+      if (input) {
+        return {
+          success: true,
+          data: input,
+        };
+      }
+    }
+  }
+
+  get handle() {
+    return handlerFunction;
+  }
+}
+
+export { Handler };
+
+export function createHandler(store: Map<string, Handler<any, any>>) {
+  const handlerStore = store;
+  return {
+    register(command: CommandDefinition<any, any>, handlerFunction: Function) {
+      return handlerStore.set(command.name, handlerFunction);
+    },
+    get(commandName: string) {
+      return handlerStore.get(commandName);
+    },
+  };
+}
+
+export { createHandler };
+
+export function createCommandHandler(store: Map<string, CommandHandler<any, any>>) {
+  const commandHandlerStore = store;
+  return {
+    register(command: CommandDefinition<any, any>) {
+      return commandHandlerStore.set(command.name, handlerFunction);
+    },
+    handle(commandName: string, input: Input) {
+      return commandHandlerStore.get(commandName)?.handle(input);
+    },
+  };
+}
+
+export { createCommandHandler };
+
+export class CommandHandler<TInput, TOutput> {
+  name: string;
+  handler: Handler<TInput, TOutput>;
+
+  constructor(store: Map<string, CommandHandler<TInput, TOutput>>) {
+    if (!store) {
+      throw new Error();
+    }
+    this.handler = handler;
+    this.store = store;
+    this.validateFunction = handler;
+    this.name = name;
+    this.commandName = name;
+    this.validateFunction = handlerFunction;
+    this.validateFunction = this.validateFunction;
+    this.handler = this.handlerFunction;
+    return {
+      register(handlerFunction: Function) {
+        handlerStore.set(name, handlerFunction);
+      },
+    };
+  }
+
+  async handle(input: TInput): Promise<TOutput> {
+    return handlerFunction(input, executionContext);
+  }
+
+  get validateFunction() {
+    return handlerFunction;
+  }
+
+  async handle(input: TInput): Promise<TOutput> {
+    return handlerFunction(input, executionContext);
+  }
+
+  get validateFunction() {
+    if (input) {
+      return handlerFunction(input);
+    }
+    if (input) {
+      return handlerFunction(input);
+    }
+    if (input) {
+      return handlerFunction(input);
+    }
+  }
+}

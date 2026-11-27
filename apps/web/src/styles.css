@@ -1,0 +1,279 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------
+   Design tokens — measured from the reference renderer (report 08):
+   sidebar 280px / rows 34px / radius 6, list column 800px, row 42-43px,
+   radii 4/6/8/10/12, durations .15/.2/.25/.3s, cubic-bezier(.4,0,.2,1).
+   Colour channels are stored as `R G B` so Tailwind opacity modifiers work.
+------------------------------------------------------------------- */
+:root {
+  --td-canvas: 255 255 255;
+  --td-sidebar: 252 250 248;
+  --td-sidebar-active: 238 238 238;
+  --td-modal: 255 255 255;
+  --td-modal-pane: 252 250 248;
+  --td-text: 32 32 32;
+  --td-text-secondary: 102 102 102;
+  --td-text-subtle: 145 145 145;
+  --td-line: 238 238 238;
+  --td-line-strong: 211 211 211;
+  --td-hover: 245 245 245;
+  --td-accent: 220 76 62;
+  --td-accent-hover: 197 55 39;
+  --td-danger: 209 69 59;
+
+  --td-priority-1: #d1453b;
+  --td-priority-2: #eb8909;
+  --td-priority-3: #246fe0;
+  --td-priority-4: #a9a9a9;
+  --td-green: #058527;
+  --td-orange: #ad6200;
+  --td-purple: #692ec2;
+  --td-card-border: rgba(0, 0, 0, 0.12);
+  --td-selected: rgba(220, 76, 62, 0.1);
+  --td-ai: #692ec2;
+  --td-ai-tint: rgba(105, 46, 194, 0.12);
+  --td-ai-tint-strong: rgba(105, 46, 194, 0.2);
+
+  --td-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --td-shadow-2: 0 2px 8px rgba(0, 0, 0, 0.16);
+  --td-shadow-3: 0 16px 50px rgba(0, 0, 0, 0.35), 0 4px 7px rgba(0, 0, 0, 0.08);
+
+  --focus-outer: rgba(31, 96, 194, 0.25);
+
+  --animation-shortest: 0.15s;
+  --animation-shorter: 0.2s;
+  --animation-short: 0.25s;
+  --animation-standard: 0.3s;
+  --td-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html.dark {
+  --td-canvas: 30 30 30;
+  --td-sidebar: 38 38 38;
+  --td-sidebar-active: 58 58 58;
+  --td-modal: 40 40 40;
+  --td-modal-pane: 34 34 34;
+  --td-text: 238 238 238;
+  --td-text-secondary: 162 162 162;
+  --td-text-subtle: 118 118 118;
+  --td-line: 51 51 51;
+  --td-line-strong: 72 72 72;
+  --td-hover: 45 45 45;
+  --td-accent: 220 76 62;
+  --td-accent-hover: 237 96 82;
+  --td-danger: 255 112 102;
+
+  --td-priority-1: #ff7066;
+  --td-priority-2: #ff9a13;
+  --td-priority-3: #5297ff;
+  --td-priority-4: #a9a9a9;
+  --td-green: #4caf50;
+  --td-orange: #ff9a13;
+  --td-purple: #a06bff;
+  --td-card-border: rgba(255, 255, 255, 0.12);
+  --td-selected: rgba(220, 76, 62, 0.16);
+  --td-ai: #a06bff;
+  --td-ai-tint: rgba(160, 107, 255, 0.14);
+  --td-ai-tint-strong: rgba(160, 107, 255, 0.24);
+
+  --td-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --td-shadow-2: 0 2px 8px rgba(0, 0, 0, 0.5);
+  --td-shadow-3: 0 16px 50px rgba(0, 0, 0, 0.65), 0 4px 7px rgba(0, 0, 0, 0.4);
+  --focus-outer: rgba(82, 151, 255, 0.35);
+  color-scheme: dark;
+}
+
+html:not(.dark) {
+  color-scheme: light;
+}
+
+* {
+  border-color: rgb(var(--td-line));
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: rgb(var(--td-canvas));
+  color: rgb(var(--td-text));
+  font-family: 'IBM Plex Sans Arabic', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgb(var(--td-accent) / 0.25);
+}
+
+/* thin scrollbars */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(var(--td-line-strong)) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(var(--td-line-strong) / 0.7);
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-outer);
+}
+
+/* quick add editor */
+.quick-add-editor {
+  font-size: 16px;
+  line-height: 23px;
+  min-height: 23px;
+  color: rgb(var(--td-text));
+  outline: none;
+  word-break: break-word;
+}
+.quick-add-editor p {
+  margin: 0;
+}
+.quick-add-editor p + p {
+  margin-top: 4px;
+}
+.quick-add-placeholder {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+  pointer-events: none;
+  font-size: 16px;
+  line-height: 23px;
+  color: rgb(var(--td-text-subtle));
+}
+
+/* NLP pills (measured: bg rgb(253,231,216), radius 4px, padding 0 4px) */
+.nlp-pill {
+  background: #fde7d8;
+  color: #202020;
+  border-radius: 4px;
+  padding: 0 4px;
+  cursor: pointer;
+  transition: background var(--animation-shortest) var(--td-ease);
+  box-decoration-break: clone;
+}
+.nlp-pill:hover {
+  background: #fbd4b8;
+}
+.nlp-pill[data-nlp-type='priority'] {
+  background: rgba(235, 137, 9, 0.2);
+}
+.nlp-pill[data-nlp-type='project'] {
+  background: rgba(36, 111, 224, 0.16);
+}
+.nlp-pill[data-nlp-type='label'] {
+  background: rgba(5, 133, 39, 0.14);
+}
+.nlp-pill[data-nlp-type='recurrence'] {
+  background: rgba(105, 46, 194, 0.16);
+}
+html.dark .nlp-pill {
+  background: #4a3527;
+  color: #f0e6dd;
+}
+html.dark .nlp-pill:hover {
+  background: #5a4030;
+}
+html.dark .nlp-pill[data-nlp-type='priority'] {
+  background: rgba(255, 154, 19, 0.22);
+}
+html.dark .nlp-pill[data-nlp-type='project'] {
+  background: rgba(82, 151, 255, 0.22);
+}
+html.dark .nlp-pill[data-nlp-type='label'] {
+  background: rgba(76, 175, 80, 0.22);
+}
+html.dark .nlp-pill[data-nlp-type='recurrence'] {
+  background: rgba(160, 107, 255, 0.22);
+}
+
+/* motion (report 08 §5) */
+@keyframes modal-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+.modal-appear {
+  animation: modal-appear var(--animation-standard) var(--td-ease);
+}
+@keyframes popover-appear {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.popover-panel {
+  animation: popover-appear var(--animation-shorter) var(--td-ease);
+}
+@keyframes highlight-flash {
+  from {
+    background: rgb(255, 255, 204);
+  }
+  to {
+    background: transparent;
+  }
+}
+.highlight-flash {
+  animation: highlight-flash 1.2s var(--td-ease);
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.toast {
+  animation: toast-in var(--animation-shorter) var(--td-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* sidebar collapsed transition */
+.app-sidebar {
+  transition: width var(--animation-shorter) var(--td-ease), transform var(--animation-shorter) var(--td-ease);
+}
+
+[dir='rtl'] .flip-icon {
+  transform: scaleX(-1);
+}

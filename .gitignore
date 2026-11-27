@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+.env
+.env.*
+!.env.example
+packages/database/prisma/*.db
+packages/database/prisma/*.db-journal
+apps/server/data/
+.DS_Store
+coverage/
+data/
