@@ -62,6 +62,8 @@ export class PluginHost {
   constructor(private readonly options: PluginHostOptions) {}
 
   install(descriptor: PluginDescriptor): void {
+    // Some builds ship stub plugins as `0`; never persist a row without an id.
+    if (!descriptor || typeof descriptor.id !== 'string' || !descriptor.id) return;
     if (this.descriptors.has(descriptor.id)) {
       // Re-installing the same plugin id simply refreshes the descriptor.
       this.descriptors.set(descriptor.id, descriptor);

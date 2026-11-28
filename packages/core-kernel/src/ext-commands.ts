@@ -68,6 +68,7 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     description:
       'Creates a task (title + optional project, description, labels, due date/time, priority, recurrence). Always compute dueDate/dueTime from the current date and clock given in the system prompt — never pass relative text like "in 1 hour".',
     input: z.object({
+      id: z.string().min(1).optional().describe('Optional client-supplied id (idempotent REST writes).'),
       content: z.string().min(1).describe('Task title — the short line the user sees (e.g. "أقفل التكييف").'),
       projectId: z
         .string()
@@ -78,6 +79,7 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
         .optional()
         .describe('Project name as the user said it (e.g. "البيت"). Matched case/whitespace-insensitively and created automatically when missing. Prefer this when you only know the name.'),
       sectionId: z.string().nullable().optional(),
+      parentId: z.string().nullable().optional(),
       labelNames: z
         .array(z.string())
         .optional()
@@ -115,12 +117,21 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
         .optional()
         .describe('1 = p1 (critical), 2 = p2 (time-critical reminders such as appliance timers or appointments), 3 = p3 (default), 4 = p4 (someday).'),
       orderKey: z.string().optional(),
+      attachments: z.array(z.string()).optional(),
+      isCompleted: z.boolean().optional(),
+      completedAt: z.string().nullable().optional(),
+      completedCount: z.number().int().min(0).optional(),
+      postponedCount: z.number().int().min(0).optional(),
     }),
     handler: (input: any, ctx: CommandContext) => {
       const store = ctx.store;
       const now = ctx.now();
       const projectId = resolveProjectId(store, ctx, input.projectId, input.projectName);
-      const duplicate = findRecentDuplicate(store, input.content, input.dueDate ?? null, input.dueTime ?? null, now);
+      // A caller-supplied id means "persist exactly this row"; never collapse it
+      // into the recent-duplicate heuristic used for AI retries.
+      const duplicate = input.id
+        ? null
+        : findRecentDuplicate(store, input.content, input.dueDate ?? null, input.dueTime ?? null, now);
       if (duplicate) {
         return {
           id: duplicate.id,
@@ -131,7 +142,7 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
           deduplicated: true,
         };
       }
-      const id = ctx.id('task');
+      const id = input.id ?? ctx.id('task');
       const orderKey = input.orderKey ?? defaultOrderKey(store);
       const labels = resolveLabels(store, input.labelNames ?? []);
       const rule = normalizeRecurrence(input.recurrence ?? null);
@@ -139,7 +150,7 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
         id,
         projectId,
         sectionId: input.sectionId ?? null,
-        parentId: null,
+        parentId: input.parentId ?? null,
         content: input.content,
         description: input.description ?? '',
         priority: input.priority ?? 4,
@@ -159,13 +170,13 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
           : null,
         labels: labels,
         checklist: [],
-        attachments: [],
-        isCompleted: false,
-        completedAt: null,
+        attachments: input.attachments ?? [],
+        isCompleted: input.isCompleted ?? false,
+        completedAt: input.isCompleted ? (input.completedAt ?? now) : null,
         createdAt: now,
         updatedAt: now,
-        completedCount: 0,
-        postponedCount: 0,
+        completedCount: input.completedCount ?? 0,
+        postponedCount: input.postponedCount ?? 0,
         deletedAt: null,
       });
       store.upsert('tasks', task);
@@ -304,24 +315,28 @@ export const EXTRA_COMMANDS: CommandDefinition[] = [
     titleAr: 'إنشاء مشروع',
     description: 'Creates a project with an optional colour, parent and favourite flag.',
     input: z.object({
+      id: z.string().min(1).optional().describe('Optional client-supplied id (idempotent REST writes).'),
       name: z.string().min(1),
       color: z.string().optional(),
       parentId: z.string().nullable().optional(),
+      orderKey: z.string().optional(),
       isFavorite: z.boolean().optional(),
       isInbox: z.boolean().optional(),
+      isArchived: z.boolean().optional(),
+      layout: z.enum(['list', 'board', 'table', 'calendar']).optional(),
     }),
     handler: (input: any, ctx: CommandContext) => {
       const now = ctx.now();
       const project = ProjectSchema.parse({
-        id: ctx.id('project'),
+        id: input.id ?? ctx.id('project'),
         name: input.name,
         color: input.color ?? '#246fe0',
         parentId: input.parentId ?? null,
-        orderKey: defaultOrderKey(ctx.store),
+        orderKey: input.orderKey ?? defaultOrderKey(ctx.store),
         isFavorite: input.isFavorite ?? false,
-        isArchived: false,
+        isArchived: input.isArchived ?? false,
         isInbox: input.isInbox ?? false,
-        layout: 'list',
+        layout: input.layout ?? 'list',
         createdAt: now,
         updatedAt: now,
       });

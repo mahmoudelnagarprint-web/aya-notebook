@@ -9,6 +9,7 @@ export {
   type SupabaseEnv,
 } from './supabase-client';
 export { AYA_TABLES, SupabaseAyaStore } from './supabase-store';
+export { SupabaseDataStore } from './supabase-data-store';
 // `createAyaStore()` lives at `@ayatodoist/database/create-store`: it lazy-loads
 // the bun:sqlite adapter, so it must stay out of this serverless-safe barrel.
 export { PrismaStore, isActivityRow } from './store';

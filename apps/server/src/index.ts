@@ -9,7 +9,8 @@ declare const Bun: {
   }) => unknown;
 };
 import { join } from 'node:path';
-import { isSupabaseConfigured, type AyaStore } from '@ayatodoist/database';
+import { MemoryStore } from '@ayatodoist/core-kernel';
+import { isSupabaseConfigured, SupabaseDataStore, type AyaStore } from '@ayatodoist/database';
 import { createAyaStore } from '@ayatodoist/database/create-store';
 import { createServerApp } from './app';
 import { createKernel } from './kernel';
@@ -24,7 +25,25 @@ export const databaseFile = process.env.AYATODOIST_DB ?? join(process.cwd(), 'da
  * `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` are set, local SQLite otherwise.
  */
 export async function createServerKernel(): Promise<{ kernel: ReturnType<typeof createKernel>; ayaStore: AyaStore }> {
-  const kernel = createKernel();
+  const netlify = (process.env.NETLIFY ?? '').trim().toLowerCase();
+  if ((netlify === 'true' || netlify === '1') && !isSupabaseConfigured()) {
+    throw new Error(
+      'Supabase is required in production: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. ' +
+        'Refusing to start with in-memory or ephemeral SQLite storage.',
+    );
+  }
+
+  // With Supabase configured, every kernel collection (tasks, projects,
+  // sections, labels, filters, activity, settings…) goes to Postgres. Only the
+  // local-first default (no Supabase env) keeps an in-memory task store.
+  const dataStore = isSupabaseConfigured()
+    ? await (async () => {
+        const supabase = new SupabaseDataStore();
+        await supabase.hydrate();
+        return supabase;
+      })()
+    : new MemoryStore();
+  const kernel = createKernel(dataStore);
   const ayaStore = await createAyaStore({ filename: databaseFile });
   // Local SQLite needs the database file to exist up front; Supabase does not.
   if (!isSupabaseConfigured()) {

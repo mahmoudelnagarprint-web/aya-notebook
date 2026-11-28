@@ -1,4 +1,4 @@
-import { Kernel, MemoryStore } from '@ayatodoist/core-kernel';
+import { Kernel, MemoryStore, type DataStore } from '@ayatodoist/core-kernel';
 import { tasksCorePlugin } from '@ayatodoist/plugin-tasks-core';
 import {
   aiAgentPlugin,
@@ -15,8 +15,8 @@ import {
  * Kept separate from `index.ts` so serverless handlers (Netlify Functions) can
  * build the kernel without pulling in the Bun HTTP server or `bun:sqlite`.
  */
-export function createKernel(): Kernel {
-  const kernel = new Kernel({ store: new MemoryStore() });
+export function createKernel(store?: DataStore): Kernel {
+  const kernel = new Kernel({ store: store ?? new MemoryStore() });
   kernel.installAll([
     tasksCorePlugin,
     viewsLayoutsPlugin,

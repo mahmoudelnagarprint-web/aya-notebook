@@ -146,6 +146,22 @@ create table if not exists public.uploads (
 );
 create index if not exists uploads_created_idx on public.uploads (created_at desc);
 
+-- ------------------------------------------------------------ kernel_rows
+-- Generic payload table for kernel collections that have no dedicated table
+-- (filters, comments, reminders, activity, goals, plugins, settings). The
+-- SupabaseDataStore adapter maps the task domain to the relational tables above
+-- and everything else to this table, so no write ever falls back to memory.
+create table if not exists public.kernel_rows (
+  collection text not null,
+  id         text not null,
+  seq        bigint not null default 0,
+  data       jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (collection, id)
+);
+create index if not exists kernel_rows_collection_seq_idx on public.kernel_rows (collection, seq);
+
 -- ============================================================================
 -- 2. AYA (AI agent) — payload rows, mirroring the SQLite `aya_rows` table
 -- ============================================================================
@@ -298,6 +314,7 @@ alter table public.labels              enable row level security;
 alter table public.task_labels         enable row level security;
 alter table public.command_history     enable row level security;
 alter table public.uploads             enable row level security;
+alter table public.kernel_rows         enable row level security;
 alter table public.aya_providers       enable row level security;
 alter table public.aya_models          enable row level security;
 alter table public.aya_routing         enable row level security;

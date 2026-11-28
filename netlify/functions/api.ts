@@ -1,8 +1,10 @@
 import { createServerApp } from '../../apps/server/src/app';
 import { createKernel } from '../../apps/server/src/kernel';
+import { MemoryStore, type DataStore } from '@ayatodoist/core-kernel';
 import {
   MemoryAyaStore,
   SupabaseAyaStore,
+  SupabaseDataStore,
   isSupabaseConfigured,
   type AyaStore,
 } from '@ayatodoist/database';
@@ -16,25 +18,62 @@ import {
  * static bundle and never sees the Supabase service key, the model API keys or
  * `API_KEY`.
  *
- * Persistence: Supabase Postgres when configured, otherwise an in-memory store
- * (serverless has no writable SQLite volume). The kernel itself is rebuilt per
- * cold start, so the store is created once per isolate and reused warm.
+ * Persistence: in production (`NETLIFY=true`) Supabase Postgres is mandatory.
+ * The task domain is written through `SupabaseDataStore` and Aya through
+ * `SupabaseAyaStore`; there is deliberately no in-memory or `/tmp` fallback.
+ * The kernel itself is rebuilt per cold start, so the stores are created once
+ * per isolate and reused warm.
  */
 
+type FlushableDataStore = DataStore & { flush?: () => Promise<void> };
+
 let appPromise: Promise<{ fetch: (request: Request) => Response | Promise<Response> }> | null = null;
-let storeRef: AyaStore | null = null;
+let dataStoreRef: FlushableDataStore | null = null;
+let ayaStoreRef: AyaStore | null = null;
+
+function isNetlifyRuntime(): boolean {
+  const flag = (process.env.NETLIFY ?? '').trim().toLowerCase();
+  // Functions v2 runs on AWS Lambda; the Lambda markers cover sites where the
+  // `NETLIFY` flag is not exposed to the function runtime.
+  return (
+    flag === 'true' ||
+    flag === '1' ||
+    Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+    Boolean(process.env.LAMBDA_TASK_ROOT)
+  );
+}
 
 async function buildApp() {
-  const kernel = createKernel();
-  const store = isSupabaseConfigured()
+  const configured = isSupabaseConfigured();
+
+  if (isNetlifyRuntime() && !configured) {
+    throw new Error(
+      'Supabase is required in production: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. ' +
+        'Refusing to start with in-memory or ephemeral /tmp storage.',
+    );
+  }
+
+  const dataStore: FlushableDataStore = configured
     ? await (async () => {
-        const supabaseStore = new SupabaseAyaStore();
-        await supabaseStore.hydrate();
-        return supabaseStore;
+        const supabase = new SupabaseDataStore();
+        await supabase.hydrate();
+        return supabase;
+      })()
+    : new MemoryStore();
+
+  const ayaStore: AyaStore = configured
+    ? await (async () => {
+        const supabase = new SupabaseAyaStore();
+        await supabase.hydrate();
+        return supabase;
       })()
     : new MemoryAyaStore();
-  storeRef = store;
-  return createServerApp(kernel, store);
+
+  dataStoreRef = dataStore;
+  ayaStoreRef = ayaStore;
+
+  const kernel = createKernel(dataStore);
+  return createServerApp(kernel, ayaStore);
 }
 
 function getApp() {
@@ -56,12 +95,23 @@ function normalizeRequest(request: Request): Request {
 }
 
 export default async function handler(request: Request): Promise<Response> {
-  const app = await getApp();
-  const response = await app.fetch(normalizeRequest(request));
-  // A frozen isolate must not lose a write: wait for the Supabase queue before
-  // returning. Streaming (SSE) responses are already handed off at this point.
-  await storeRef?.flush?.();
-  return response;
+  try {
+    const app = await getApp();
+    const response = await app.fetch(normalizeRequest(request));
+    // A frozen isolate must not lose a write: wait for both Supabase queues
+    // before returning. Streaming (SSE) responses are already handed off.
+    await dataStoreRef?.flush?.();
+    await ayaStoreRef?.flush?.();
+    return response;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    const configurationError = /Supabase is required|Supabase hydrate failed|is not configured/i.test(message);
+    console.error('[netlify/api]', message);
+    return Response.json(
+      { ok: false, error: { code: configurationError ? 'configuration' : 'error', message } },
+      { status: configurationError ? 503 : 500 },
+    );
+  }
 }
 
 export const config = { path: '/api/*' };

@@ -176,9 +176,35 @@ function openApiDocument(origin: string) {
           ],
           responses: { '200': { description: 'Task list' } },
         },
+        post: {
+          operationId: 'createTask',
+          summary: 'Create a task (camelCase or snake_case payload; persists to Supabase)',
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' } } } },
+          responses: {
+            '201': { description: 'Persisted task' },
+            '400': { description: 'Validation error' },
+          },
+        },
       },
       '/api/v1/projects': {
         get: { operationId: 'listProjects', responses: { '200': { description: 'Project list' } } },
+        post: {
+          operationId: 'createProject',
+          summary: 'Create a project (camelCase or snake_case payload; persists to Supabase)',
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' } } } },
+          responses: {
+            '201': { description: 'Persisted project' },
+            '400': { description: 'Validation error' },
+          },
+        },
+      },
+      '/api/v1/sync': {
+        post: {
+          operationId: 'sync',
+          summary: 'Replay queued kernel commands (offline queue)',
+          requestBody: { required: true, content: { 'application/json': { schema: { type: 'object' } } } },
+          responses: { '200': { description: 'Per-operation results' } },
+        },
       },
       '/api/aya/health': { get: { operationId: 'ayaHealth', responses: { '200': { description: 'Aya status' } } } },
       '/api/aya/config': { get: { operationId: 'ayaConfig', responses: { '200': { description: 'Aya configuration' } } } },
@@ -226,6 +252,110 @@ function openApiDocument(origin: string) {
   };
 }
 
+/* ------------------------------------------------------- REST write helpers */
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readFirst(source: Record<string, unknown>, keys: string[]): unknown {
+  for (const key of keys) {
+    if (source[key] !== undefined) return source[key];
+  }
+  return undefined;
+}
+
+function readString(source: Record<string, unknown>, keys: string[]): string | undefined {
+  const value = readFirst(source, keys);
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).trim();
+  return text || undefined;
+}
+
+function readNumber(source: Record<string, unknown>, keys: string[]): number | undefined {
+  const value = readFirst(source, keys);
+  if (value === undefined || value === null || value === '') return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readBoolean(source: Record<string, unknown>, keys: string[]): boolean | undefined {
+  const value = readFirst(source, keys);
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'boolean') return value;
+  if (value === 'true' || value === 1 || value === '1') return true;
+  if (value === 'false' || value === 0 || value === '0') return false;
+  return undefined;
+}
+
+function readDay(source: Record<string, unknown>, keys: string[]): string | undefined {
+  const text = readString(source, keys);
+  const match = text ? /^(\d{4}-\d{2}-\d{2})/.exec(text) : null;
+  return match?.[1];
+}
+
+function readTime(source: Record<string, unknown>, keys: string[]): string | undefined {
+  const text = readString(source, keys);
+  const match = text ? /^([01]\d|2[0-3]):([0-5]\d)/.exec(text) : null;
+  return match ? `${match[1]}:${match[2]}` : undefined;
+}
+
+function projectPayload(body: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: readString(body, ['id']),
+    name: readString(body, ['name', 'title']),
+    color: readString(body, ['color']),
+    parentId: readString(body, ['parentId', 'parent_id']),
+    orderKey: readString(body, ['orderKey', 'order_key']),
+    isFavorite: readBoolean(body, ['isFavorite', 'is_favorite']),
+    isArchived: readBoolean(body, ['isArchived', 'is_archived']),
+    isInbox: readBoolean(body, ['isInbox', 'is_inbox']),
+    layout: readString(body, ['layout']),
+  };
+}
+
+function taskPayload(body: Record<string, unknown>): Record<string, unknown> {
+  const rawLabels = readFirst(body, ['labelNames', 'label_names', 'labels']);
+  const rawAttachments = readFirst(body, ['attachments']);
+  return {
+    id: readString(body, ['id']),
+    content: readString(body, ['content', 'title', 'name']),
+    projectId: readString(body, ['projectId', 'project_id']),
+    projectName: readString(body, ['projectName', 'project_name']),
+    sectionId: readString(body, ['sectionId', 'section_id']),
+    parentId: readString(body, ['parentId', 'parent_id']),
+    description: readString(body, ['description', 'notes']),
+    priority: readNumber(body, ['priority']),
+    dueDate: readDay(body, ['dueDate', 'due_date']),
+    dueTime: readTime(body, ['dueTime', 'due_time']),
+    deadline: readDay(body, ['deadline']),
+    durationMinutes: readNumber(body, ['durationMinutes', 'duration_minutes']),
+    recurrence: readFirst(body, ['recurrence']),
+    labelNames: Array.isArray(rawLabels) ? rawLabels.map((label) => String(label)) : undefined,
+    orderKey: readString(body, ['orderKey', 'order_key']),
+    attachments: Array.isArray(rawAttachments) ? rawAttachments.map((item) => String(item)) : undefined,
+    isCompleted: readBoolean(body, ['isCompleted', 'is_completed', 'completed']),
+  };
+}
+
+function writeFailure(c: { json: (body: unknown, status: 400) => Response }, error: unknown): Response {
+  const typed = error as { code?: string; message?: string; name?: string };
+  // Zod errors raised inside a command handler are client validation failures,
+  // not server faults; without this they surfaced as HTTP 500.
+  const validation = typed.code === 'validation' || typed.name === 'ZodError';
+  const status = validation ? 400 : typed.code === 'not-found' ? 404 : typed.code === 'permission' ? 403 : 500;
+  return c.json(
+    {
+      ok: false,
+      error: {
+        code: validation ? 'validation' : (typed.code ?? 'error'),
+        message: typed.message ?? 'Write failed',
+      },
+    },
+    status as 400,
+  );
+}
+
 export async function createServerApp(kernel: Kernel, ayaStore?: AyaStore) {
   const app = new Hono();
   // A standalone app (tests, serverless boot) still gets a working Aya API; the
@@ -236,6 +366,15 @@ export async function createServerApp(kernel: Kernel, ayaStore?: AyaStore) {
     // A serverless platform freezes between requests, so a periodic timer would
     // never be dependable: Netlify relies on POST /api/aya/health-check/run.
     if (process.env.NETLIFY !== 'true') ayaService.startHealthChecks();
+  });
+
+  // A write-behind Postgres store (SupabaseDataStore) must reach the database
+  // before the response leaves the isolate. MemoryStore has no flush, so this is
+  // a no-op locally.
+  const persistentStore = kernel.store as typeof kernel.store & { flush?: () => Promise<void> };
+  app.use('*', async (c, next) => {
+    await next();
+    await persistentStore.flush?.();
   });
 
   // CORS for every route, including the preflight itself.
@@ -338,6 +477,116 @@ export async function createServerApp(kernel: Kernel, ayaStore?: AyaStore) {
   app.get('/api/v1/projects', (c) => {
     const projects = (kernel.snapshot().collections.projects ?? []) as unknown[];
     return c.json({ ok: true, projects, count: projects.length });
+  });
+
+  /**
+   * REST writes for external agents. Both endpoints accept camelCase and the
+   * snake_case shape that a Supabase/PostgREST client naturally sends
+   * (`project_id`, `due_date`, `title`, …), validate references against the
+   * hydrated store, and return the persisted row (not just a command ack).
+   */
+  app.post('/api/v1/projects', async (c) => {
+    let body: Record<string, unknown> = {};
+    try {
+      body = asRecord(await c.req.json());
+    } catch {
+      body = {};
+    }
+    const input = projectPayload(body);
+    if (!input.name) {
+      return c.json({ ok: false, error: { code: 'validation', message: 'Project name (name or title) is required' } }, 400);
+    }
+    try {
+      const project = await kernel.execute<unknown, Record<string, unknown>>('project.create', input as never);
+      return c.json({ ok: true, project }, 201);
+    } catch (error) {
+      return writeFailure(c, error);
+    }
+  });
+
+  app.post('/api/v1/tasks', async (c) => {
+    let body: Record<string, unknown> = {};
+    try {
+      body = asRecord(await c.req.json());
+    } catch {
+      body = {};
+    }
+    const input = taskPayload(body);
+    if (!input.content) {
+      return c.json({ ok: false, error: { code: 'validation', message: 'Task content (content, title or name) is required' } }, 400);
+    }
+
+    // A dangling section/parent id would violate a Postgres foreign key and turn
+    // a perfectly valid task write into a 500. Drop only the broken reference.
+    if (typeof input.sectionId === 'string' && !kernel.store.get('sections', input.sectionId)) input.sectionId = null;
+    if (typeof input.parentId === 'string' && !kernel.store.get('tasks', input.parentId)) input.parentId = null;
+
+    // `labels` may be ids or names; the command resolves names and creates
+    // missing labels, so map known ids back to their names first.
+    if (Array.isArray(input.labelNames)) {
+      input.labelNames = (input.labelNames as unknown[]).map((value) => {
+        const text = String(value);
+        const label = kernel.store.get('labels', text);
+        return label?.name ?? text;
+      });
+    }
+
+    try {
+      const created = await kernel.execute<unknown, { id: string }>('task.create', input as never);
+      const task = kernel.store.get('tasks', created.id) ?? created;
+      return c.json({ ok: true, task }, 201);
+    } catch (error) {
+      return writeFailure(c, error);
+    }
+  });
+
+  /**
+   * Command replay for the web client's offline queue. Operations are applied in
+   * order through the same kernel as `/api/v1/command/:name`, so a Supabase
+   * deployment persists every mutation before the request returns.
+   */
+  app.post('/api/v1/sync', async (c) => {
+    let body: Record<string, unknown> = {};
+    try {
+      body = asRecord(await c.req.json());
+    } catch {
+      body = {};
+    }
+    const operations = Array.isArray(body.operations)
+      ? body.operations
+      : Array.isArray(body.commands)
+        ? body.commands
+        : [];
+    const results: Array<{ id: string; ok: boolean; result?: unknown; error?: string }> = [];
+    for (const raw of operations) {
+      const operation = asRecord(raw);
+      const id = typeof operation.id === 'string' ? operation.id : `op-${results.length}`;
+      const name = typeof operation.name === 'string' ? operation.name : '';
+      if (!name) {
+        results.push({ id, ok: false, error: 'Missing command name' });
+        continue;
+      }
+      const actor = operation.actor === 'ai' || operation.actor === 'system' ? operation.actor : 'user';
+      try {
+        const result = await kernel.execute(name, (operation.input ?? {}) as never, {
+          actor,
+          batchId: typeof operation.batchId === 'string' ? operation.batchId : undefined,
+        });
+        results.push({ id, ok: true, result });
+      } catch (error) {
+        results.push({ id, ok: false, error: (error as Error).message });
+      }
+    }
+    const snapshot = kernel.snapshot();
+    return c.json({
+      ok: results.every((result) => result.ok),
+      cursor: new Date().toISOString(),
+      serverTime: new Date().toISOString(),
+      results,
+      deltas: [],
+      activity: snapshot.collections.activity ?? [],
+      collections: snapshot.collections,
+    });
   });
 
   app.post('/api/v1/command/:name', async (c) => {
