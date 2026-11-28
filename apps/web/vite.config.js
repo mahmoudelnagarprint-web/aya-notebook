@@ -38,5 +38,10 @@ export default defineConfig({
             '/api': { target: 'http://127.0.0.1:8787', changeOrigin: true },
         },
     },
+    define: {
+        // Stamped at build time so the web app can default to same-origin `/api/...`
+        // on Netlify and keep the explicit local-server default only in dev.
+        'import.meta.env.PROD': JSON.stringify(process.env.NODE_ENV === 'production'),
+    },
     build: { outDir: 'dist', sourcemap: false, target: 'es2022' },
 });

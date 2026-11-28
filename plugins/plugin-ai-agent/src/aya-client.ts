@@ -34,10 +34,34 @@ function envValue(key: string): string | undefined {
   return env?.[key];
 }
 
+/**
+ * Build-time flag stamped by Vite via `define` in the Web app’s config. It is
+ * `true` for production builds and `false` otherwise; in shared plugin code it
+ * is only meaningful for the Web app, so the default is only switched there when
+ * the flag is truthy.
+ */
+export declare const __VITE_IS_PRODUCTION: boolean;
+
+function isProductionBuild(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    return (import.meta as unknown as { env?: Record<string, unknown> }).env?.PROD === true;
+  } catch {
+    return false;
+  }
+}
+
 export function ayaApiBase(): string {
   const configured = (envValue('VITE_API_BASE_URL') ?? '').trim();
-  const base = configured || DEFAULT_AYA_API_BASE;
-  return base.replace(/\/+$/, '');
+  if (configured) return configured.replace(/\/+$/, '');
+
+  // In production builds the web app lives on the same origin as Netlify
+  // Functions, so relative `/api/...` paths resolve correctly.
+  if (isProductionBuild()) return '';
+
+  // Local development still hits the local server directly (the Vite proxy may
+  // be disabled). Keep the explicit default only for the web and extension dev flows.
+  return DEFAULT_AYA_API_BASE;
 }
 
 export function ayaUrl(path: string): string {
