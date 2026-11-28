@@ -4,21 +4,58 @@ import { COLLECTION_KEYS } from '@ayatodoist/shared-types';
 /** Task fields that must always be arrays, even when a row came back from SQLite with `null`. */
 const TASK_ARRAY_FIELDS = ['labels', 'checklist', 'attachments'] as const;
 
+/** API response fields that mirror the frontend camelCase model. */
+const TASK_CAMEL_FIELDS = ['projectId', 'sectionId', 'parentId', 'dueDate', 'dueTime', 'deadline', 'completedAt'] as const;
+
 /**
  * Normalises a row before it enters memory. Hydrated rows (SQLite/Prisma/JSON backups) may
  * carry `null` for JSON columns, which made task rows crash on `undefined.length`.
+ *
+ * API responses may also arrive with snake_case keys such as `project_id`; this layer
+ * coerces those into the canonical `projectId` shape so frontend filtering stays consistent.
  */
 export function normalizeRow<K extends CollectionKey>(collection: K, row: RowOf<K>): RowOf<K> {
   if (collection !== 'tasks' || !row) return row;
   const source = row as unknown as Record<string, unknown>;
   let changed = false;
   const normalized: Record<string, unknown> = { ...source };
+
   for (const field of TASK_ARRAY_FIELDS) {
     if (!Array.isArray(normalized[field])) {
       normalized[field] = [];
       changed = true;
     }
   }
+
+  if (source['project_id'] !== undefined && source['projectId'] === undefined) {
+    normalized['projectId'] = source['project_id'];
+    changed = true;
+  }
+  if (source['section_id'] !== undefined && source['sectionId'] === undefined) {
+    normalized['sectionId'] = source['section_id'];
+    changed = true;
+  }
+  if (source['parent_id'] !== undefined && source['parentId'] === undefined) {
+    normalized['parentId'] = source['parent_id'];
+    changed = true;
+  }
+  if (source['due_date'] !== undefined && source['dueDate'] === undefined) {
+    normalized['dueDate'] = source['due_date'];
+    changed = true;
+  }
+  if (source['due_time'] !== undefined && source['dueTime'] === undefined) {
+    normalized['dueTime'] = source['due_time'];
+    changed = true;
+  }
+  if (source['deadline'] !== undefined && source['deadline'] === undefined) {
+    normalized['deadline'] = source['deadline'];
+    changed = true;
+  }
+  if (source['completed_at'] !== undefined && source['completedAt'] === undefined) {
+    normalized['completedAt'] = source['completed_at'];
+    changed = true;
+  }
+
   return changed ? (normalized as unknown as RowOf<K>) : row;
 }
 
@@ -79,8 +116,7 @@ export function deepClone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/**
- * Wraps a store and records every touched row (before/after) so the kernel can
+/** Wraps a store and records every touched row (before/after) so the kernel can
  * build a complete, reversible patch list for undo/redo and the activity log.
  */
 export class TracingStore implements DataStore {
@@ -165,5 +201,29 @@ export class TracingStore implements DataStore {
         store.upsert(collection, value as RowOf<CollectionKey>);
       }
     }
+  }
+}
+
+/** Deleted or soft-deleted task rows must never survive a reload. */
+function isDeletedTask(row: unknown): boolean {
+  if (!row || typeof row !== 'object') return false;
+  const task = row as Record<string, unknown>;
+  const deletedAt = task['deletedAt'] ?? task['deleted_at'];
+  if (deletedAt !== undefined && deletedAt !== null) return true;
+  if (task['is_deleted'] === true) return true;
+  return false;
+}
+
+/** In-memory store that purges deleted tasks on every full replace. */
+export class PurgingMemoryStore extends MemoryStore {
+  override replaceAll(snapshot: Partial<Record<CollectionKey, unknown[]>>): void {
+    const cleaned: Partial<Record<CollectionKey, unknown[]>> = {};
+    for (const key of COLLECTION_KEYS) {
+      const rows = snapshot[key];
+      if (!rows) continue;
+      const kept = (rows as unknown[]).filter((row) => !(key === 'tasks' && isDeletedTask(row)));
+      if (kept.length > 0) cleaned[key] = kept;
+    }
+    super.replaceAll(cleaned);
   }
 }

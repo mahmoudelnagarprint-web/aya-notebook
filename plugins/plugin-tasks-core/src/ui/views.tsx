@@ -199,7 +199,7 @@ export function ProjectView({ projectId, onAddTask }: ViewProps & { projectId: s
   useKernelVersion();
   const language = useLanguage();
   const projects = useProjects();
-  const project = projects.find((item) => item.id === projectId);
+  const project = findProjectById(projects, projectId);
   const tasks = sortTasks(kernel.store.list('tasks').filter((task) => task.projectId === projectId && !task.deletedAt));
   const [selected, setSelected] = useState<string | null>(null);
   const open = tasks.filter((task) => !task.isCompleted);
@@ -267,4 +267,14 @@ export function TaskResultsView({ tasks, title, subtitle, tone = 'blue' }: { tas
       <TaskDetail taskId={selected} onClose={() => setSelected(null)} />
     </div>
   );
+}
+
+/** Matches a project by id with tolerant string/number coercion. */
+function findProjectById(projects: Array<{ id: string | number | null | undefined; name?: string | null }>, projectId: string | null | undefined): { id: string; name?: string | null } | null {
+  if (!projectId) return null;
+  const target = String(projectId);
+  for (const project of projects) {
+    if (project && String(project.id) === target) return project as { id: string; name?: string | null };
+  }
+  return null;
 }
