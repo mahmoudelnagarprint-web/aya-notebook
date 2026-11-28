@@ -179,9 +179,9 @@ const manifest = {
     'sidePanel',
   ],
   host_permissions: [
+    'https://aya-notebook-web.netlify.app/*',
     'http://127.0.0.1:8787/*',
     'http://localhost:8787/*',
-    '<all_urls>',
   ],
   background: {
     service_worker: 'background.js',
@@ -202,7 +202,7 @@ const manifest = {
     },
   ],
   content_security_policy: {
-    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; media-src 'self'; connect-src 'self' http://127.0.0.1:8787 http://localhost:8787 https://127.0.0.1:8787 https://localhost:8787",
+    extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; media-src 'self'; connect-src 'self' http://127.0.0.1:8787 http://localhost:8787 https://127.0.0.1:8787 https://localhost:8787 https://aya-notebook-web.netlify.app",
   },
   commands: {
     '_execute_action': { suggested_key: { default: 'Alt+A' } },

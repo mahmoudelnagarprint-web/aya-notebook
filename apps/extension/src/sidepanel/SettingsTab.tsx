@@ -1,7 +1,7 @@
 /** Tab 4 — connection settings, side handle, selection toolbar and offline queue. */
 
 import { useCallback, useEffect, useState } from 'react';
-import { ayaServer, invalidateConfig } from '../lib/server';
+import { ayaServer, invalidateConfig, setApiKey } from '../lib/server';
 import { flushQueue, readQueue, type QueueState } from '../lib/queue';
 import { STORAGE_KEYS, DEFAULT_SETTINGS } from '../lib/core';
 import { openWebApp } from '../lib/browser';
@@ -34,7 +34,7 @@ export default function SettingsTab({ onChanged }: Props) {
     const next = { ...settings, ...patch };
     setSettings(next);
     await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: next });
-    await chrome.storage.local.set({ 'aya:server': { baseUrl: next.serverBaseUrl, token: next.bearerToken } });
+    await chrome.storage.local.set({ 'aya:server': { baseUrl: next.serverBaseUrl, token: next.apiKey || next.bearerToken } });
     invalidateConfig();
     try {
       await chrome.runtime.sendMessage({ type: 'aya-settings-changed' });
@@ -83,20 +83,20 @@ export default function SettingsTab({ onChanged }: Props) {
           <input
             className="input"
             value={settings.serverBaseUrl ?? ''}
-            placeholder="http://127.0.0.1:8787"
+            placeholder="https://aya-notebook-web.netlify.app"
             onChange={(event) => setSettings({ ...settings, serverBaseUrl: event.target.value })}
             onBlur={(event) => save({ serverBaseUrl: event.target.value.trim() })}
           />
         </div>
         <div>
-          <label className="field-label">Bearer Token (اختياري)</label>
+          <label className="field-label">API Key (اختياري)</label>
           <input
             className="input"
             type="password"
-            value={settings.bearerToken ?? ''}
-            placeholder="للنشر السحابي فقط"
-            onChange={(event) => setSettings({ ...settings, bearerToken: event.target.value })}
-            onBlur={(event) => save({ bearerToken: event.target.value.trim() })}
+            value={settings.apiKey ?? ''}
+            placeholder="ZVcSKqjW9ptxesWXxUOmYDEWXYv1xQGUT1Aw4cKJ"
+            onChange={(event) => setSettings({ ...settings, apiKey: event.target.value })}
+            onBlur={(event) => { save({ apiKey: event.target.value.trim() }); setApiKey(event.target.value.trim()); }}
           />
         </div>
         <div className="row wrap">

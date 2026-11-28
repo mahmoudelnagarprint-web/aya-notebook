@@ -42,7 +42,7 @@ export default function SettingsPage() {
 
       <section style={{ marginBottom: 20 }}>
         <h3 style={{ fontSize: 12, color: '#9a9a9a', marginBottom: 6, letterSpacing: '.4px' }}>الخادم</h3>
-        <label style={{ display: 'block', marginBottom: 6 }}>
+                  <label style={{ display: 'block', marginBottom: 6 }}>
           <span style={{ fontSize: 11, color: '#9a9a9a', display: 'block', marginBottom: 2 }}>خادم الأساس</span>
           <input
             value={s?.serverBaseUrl || ''}
@@ -51,12 +51,12 @@ export default function SettingsPage() {
           />
         </label>
         <label style={{ display: 'block', marginBottom: 12 }}>
-          <span style={{ fontSize: 11, color: '#9a9a9a', display: 'block', marginBottom: 2 }}>Bearer Token (اختياري — للنشر السحابي 미래에)</span>
+          <span style={{ fontSize: 11, color: '#9a9a9a', display: 'block', marginBottom: 2 }}>API Key (اختياري — لو مش بتستخدم الافتراضي)</span>
           <input
             type="password"
-            value={s?.bearerToken || ''}
-            onChange={(e) => save({ bearerToken: e.target.value })}
-            placeholder="sk-…"
+            value={s?.apiKey || ''}
+            onChange={(e) => save({ apiKey: e.target.value })}
+            placeholder="ZVcSKqjW9ptxesWXxUOmYDEWXYv1xQGUT1Aw4cKJ"
             style={{ width: '100%', background: '#1e1e1e', color: '#fbfbfb', border: '1px solid #323232', borderRadius: 8, padding: '7px 9px', fontSize: 12 }}
           />
         </label>

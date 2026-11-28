@@ -1,0 +1,67 @@
+{
+  "manifest_version": 3,
+  "name": "__AYAtodoist · آية",
+  "version": "0.1.0.0",
+  "description": "Right-click tasks, floating Aya chat, quick-add and offline sync",
+  "action": {
+    "default_title": "آية · __AYAtodoist",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_popup": "html/popup.html"
+  },
+  "side_panel": {
+    "default_path": "html/sidepanel.html"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting",
+    "notifications",
+    "alarms",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://aya-notebook-web.netlify.app/*",
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": ["<all_urls>"],
+      "resources": ["content.js", "icons/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; media-src 'self'; connect-src 'self' http://127.0.0.1:8787 http://localhost:8787 https://127.0.0.1:8787 https://localhost:8787 https://aya-notebook-web.netlify.app"
+  },
+  "commands": {
+    "_execute_action": { "suggested_key": { "default": "Alt+A" } },
+    "_execute_side_panel": { "suggested_key": { "default": "Alt+S" }, "description": "open side panel" },
+    "aya-chat": { "suggested_key": { "default": "Alt+Shift+A" }, "description": "toggle floating Aya chat drawer" },
+    "quick-add": { "suggested_key": { "default": "Alt+Q" }, "description": "quick-add task from the current page" }
+  },
+  "options_page": "html/settings.html"
+}

@@ -2,17 +2,17 @@
  * Typed client for the local `__AYAtodoist` server.
  *
  * All extension surfaces (background worker, side panel, popup, content script
- * proxied through the worker) use this one module so the base URL, bearer token
- * and error handling stay consistent.
+ * proxied through the worker) use this one module so the base URL, api key and
+ * error handling stay consistent.
  */
 
-export const DEFAULT_BASE_URL = 'http://127.0.0.1:8787';
+export const DEFAULT_BASE_URL = 'https://aya-notebook-web.netlify.app';
+export const DEFAULT_API_KEY = 'ZVcSKqjW9ptxesWXxUOmYDEWXYv1xQGUT1Aw4cKJ';
 
 export interface ServerConfig {
   baseUrl: string;
   token?: string;
 }
-
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -34,13 +34,15 @@ export function invalidateConfig(): void {
 export async function resolveConfig(): Promise<ServerConfig> {
   if (cached) return cached;
   let baseUrl = DEFAULT_BASE_URL;
-  let token = '';
+  let token = DEFAULT_API_KEY;
   try {
-    const stored = (await chrome.storage.local.get(['aya:settings', 'aya:server', 'aya:bearer'])) as Record<string, any>;
+    const stored = (await chrome.storage.local.get(['aya:settings', 'aya:server', 'aya:apiKey', 'aya:bearer'])) as Record<string, any>;
     const settings = stored['aya:settings'] ?? {};
     if (typeof settings.serverBaseUrl === 'string' && settings.serverBaseUrl.trim()) baseUrl = settings.serverBaseUrl.trim();
-    if (typeof settings.bearerToken === 'string') token = settings.bearerToken.trim();
+    if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) token = settings.apiKey.trim();
+    if (typeof settings.bearerToken === 'string' && settings.bearerToken.trim()) token = settings.bearerToken.trim();
     if (!settings.serverBaseUrl && typeof stored['aya:server']?.baseUrl === 'string') baseUrl = stored['aya:server'].baseUrl;
+    if (!token && typeof stored['aya:server']?.token === 'string') token = stored['aya:server'].token;
     if (!token && typeof stored['aya:bearer'] === 'string') token = stored['aya:bearer'];
   } catch {
     /* storage unavailable — defaults are fine */
@@ -59,12 +61,12 @@ export async function setBaseUrl(url: string): Promise<void> {
   invalidateConfig();
 }
 
-export async function setToken(token: string): Promise<void> {
+export async function setApiKey(apiKey: string): Promise<void> {
   const current = await resolveConfig();
+  const next = apiKey.trim() || undefined;
   await chrome.storage.local.set({
-    'aya:bearer': token,
-    'aya:server': { baseUrl: current.baseUrl, token },
-    'aya:settings': { ...(await readSettings()), bearerToken: token },
+    'aya:server': { baseUrl: current.baseUrl, token: next },
+    'aya:settings': { ...(await readSettings()), apiKey: next },
   });
   invalidateConfig();
 }
@@ -78,12 +80,13 @@ async function readSettings(): Promise<Record<string, unknown>> {
   }
 }
 
-async function headers(cfg: ServerConfig, json: boolean): Promise<Headers> {
+async function headers(cfg: ServerConfig, json: boolean, extra?: Record<string, string>): Promise<Headers> {
   const h = new Headers();
   h.set('accept', 'application/json');
   if (json) h.set('content-type', 'application/json');
   h.set('x-aya-extension', '1');
-  if (cfg.token) h.set('authorization', `Bearer ${cfg.token}`);
+  if (cfg.token) h.set('x-api-key', cfg.token);
+  if (extra) Object.entries(extra).forEach(([k, v]) => h.set(k, v));
   return h;
 }
 
@@ -115,12 +118,10 @@ async function request<T>(path: string, init: RequestInit & { timeoutMs?: number
 }
 
 /* ------------------------------------------------------------------ types */
-
 export interface HealthResponse {
   ok: boolean;
   at: string;
 }
-
 export interface UploadResult {
   ok: boolean;
   filename: string;
@@ -131,7 +132,6 @@ export interface UploadResult {
   kind: 'image' | 'file';
   text?: string;
 }
-
 export interface AyaConfig {
   providers: Array<{
     id: string;
@@ -154,7 +154,6 @@ export interface AyaConfig {
   routing: Record<string, string | null>;
   settings: Record<string, unknown>;
 }
-
 export interface InboxItem {
   id: string;
   kind: string;
@@ -164,25 +163,22 @@ export interface InboxItem {
   actions?: Array<{ name: string; input?: unknown }>;
   createdAt?: string;
 }
-
 export interface ConversationRow {
   id: string;
   title: string;
   createdAt: string;
   updatedAt: string;
 }
-
 export interface ChatEvent {
   event: string;
   data: any;
 }
 
 /* -------------------------------------------------------------------- API */
-
 export const ayaServer = {
   getConfig: resolveConfig,
   setBaseUrl,
-  setToken,
+  setApiKey,
 
   async health(): Promise<HealthResponse> {
     return request<HealthResponse>('/api/v1/health', { timeoutMs: 5000 });

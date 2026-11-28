@@ -5,8 +5,9 @@
  */
 
 export interface Settings {
-  serverBaseUrl: string;     // http://127.0.0.1:8787
-  bearerToken: string;      // optional
+  serverBaseUrl: string;     // https://aya-notebook-web.netlify.app
+  bearerToken: string;      // currently unused; keyed auth goes through apiKey
+  apiKey: string;
   handleSide: 'right' | 'left' | 'hidden';
   handleY: number;          // vertical pixel offset from top
   handleVisible: boolean;
@@ -46,8 +47,9 @@ export function nextOperationId(): string {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  serverBaseUrl: 'http://127.0.0.1:8787',
+  serverBaseUrl: 'https://aya-notebook-web.netlify.app',
   bearerToken: '',
+  apiKey: 'ZVcSKqjW9ptxesWXxUOmYDEWXYv1xQGUT1Aw4cKJ',
   handleSide: 'right',
   handleY: 120,
   handleVisible: true,

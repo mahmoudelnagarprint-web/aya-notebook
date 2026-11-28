@@ -99,10 +99,14 @@ export function readActivePageViaBackground(): Promise<{ title: string; url: str
 }
 
 export function openWebApp(hash = ''): void {
-  chrome.tabs.create({ url: `http://127.0.0.1:5173/${hash}` });
+  chrome.tabs.create({ url: `https://aya-notebook-web.netlify.app/${hash}` });
 }
 
 export async function dataUrlToFile(dataUrl: string, name = 'screenshot.png'): Promise<File> {
   const blob = await (await fetch(dataUrl)).blob();
   return new File([blob], name, { type: blob.type || 'image/png' });
+}
+
+export function openWebAppUrl(): string {
+  return 'https://aya-notebook-web.netlify.app';
 }
