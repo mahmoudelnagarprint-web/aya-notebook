@@ -40,6 +40,12 @@
       "@ayatodoist/database": [
         "packages/database/src/index.ts"
       ],
+      "@ayatodoist/database/sqlite": [
+        "packages/database/src/aya-store.ts"
+      ],
+      "@ayatodoist/database/create-store": [
+        "packages/database/src/create-store.ts"
+      ],
       "@ayatodoist/plugin-tasks-core": [
         "plugins/plugin-tasks-core/src/index.ts"
       ],
@@ -104,7 +110,8 @@
     "apps/web/vite.config.ts",
     "apps/web/tailwind.config.ts",
     "apps/extension/src/**/*.ts",
-    "apps/extension/src/**/*.tsx"
+    "apps/extension/src/**/*.tsx",
+    "netlify/functions/**/*.ts"
   ],
   "exclude": [
     "node_modules",

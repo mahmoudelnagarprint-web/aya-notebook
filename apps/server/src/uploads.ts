@@ -3,6 +3,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import * as zlib from 'node:zlib';
+import { getSupabaseAdmin, isSupabaseConfigured, publicUploadUrl } from '@ayatodoist/database';
+
+/** Public Supabase Storage bucket used for every upload when Supabase is configured. */
+export const SUPABASE_UPLOAD_BUCKET = 'uploads';
 
 const IMAGE_MIME = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 const IMAGE_EXT: Record<string, string> = {
@@ -37,12 +41,53 @@ const MAX_TEXT = 60_000;
 
 export function uploadsDir(appDir = process.cwd()): string {
   const dir = path.resolve(appDir, 'data', 'uploads');
-  fs.mkdirSync(dir, { recursive: true });
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* read-only filesystem (serverless): only Supabase Storage is usable there */
+  }
   return dir;
 }
 
 function baseDir(appDir: string) {
   return uploadsDir(appDir);
+}
+
+interface StoredUpload {
+  url: string;
+  error?: string;
+}
+
+/**
+ * Persists one upload: Supabase Storage when SUPABASE_URL is set, local disk
+ * otherwise. Returns the public URL the client should use.
+ */
+async function storeUpload(dir: string, filename: string, buf: Buffer, mime: string, size: number): Promise<StoredUpload> {
+  if (isSupabaseConfigured()) {
+    const client = getSupabaseAdmin();
+    const { error } = await client.storage.from(SUPABASE_UPLOAD_BUCKET).upload(filename, buf, {
+      contentType: mime,
+      cacheControl: '31536000',
+      upsert: true,
+    });
+    if (error) return { url: '', error: error.message };
+
+    const url = publicUploadUrl(filename) ?? `/api/v1/uploads/${filename}`;
+    // Best-effort bookkeeping row for external agents; the file itself already
+    // lives in Storage, so a missing `uploads` table must not fail the request.
+    const { error: recordError } = await client.from('uploads').insert({
+      id: filename,
+      filename,
+      content_type: mime,
+      size,
+      url,
+    });
+    if (recordError) console.warn('[uploads] could not record row:', recordError.message);
+    return { url };
+  }
+
+  fs.writeFileSync(path.join(dir, filename), buf);
+  return { url: `/api/v1/uploads/${filename}` };
 }
 
 interface UploadRequest {
@@ -210,7 +255,11 @@ export function handleUploads(appDir?: string) {
     }
     const ext = IMAGE_EXT[mime] ?? (mime === 'application/pdf' ? '.pdf' : TEXT_EXT[mime] ?? '.txt');
     const filename = crypto.randomUUID() + ext;
-    fs.writeFileSync(path.join(dir, filename), buf);
+
+    const stored = await storeUpload(dir, filename, buf, mime, buf.length);
+    if (stored.error) {
+      return c.json({ ok: false, error: { code: 'upload-failed', message: stored.error } }, 502);
+    }
 
     let text: string | undefined;
     let kind: 'image' | 'file' = 'file';
@@ -228,7 +277,7 @@ export function handleUploads(appDir?: string) {
       size: buf.length,
       kind,
       text,
-      url: `/api/v1/uploads/${filename}`,
+      url: stored.url,
     });
   });
 
@@ -243,6 +292,13 @@ export function handleUploads(appDir?: string) {
     if (!expectedMime) {
       return c.json({ ok: false, error: { code: 'not-found', message: 'Unknown filename' } }, 404);
     }
+    // With Supabase Storage the bytes live in the public bucket: redirect there
+    // instead of proxying them through the function.
+    if (isSupabaseConfigured()) {
+      const publicUrl = publicUploadUrl(safe);
+      if (publicUrl) return c.redirect(publicUrl, 302);
+    }
+
     const target = path.join(dir, safe);
     if (!fs.existsSync(target)) {
       return c.json({ ok: false, error: { code: 'not-found', message: 'File not found' } }, 404);
@@ -257,7 +313,7 @@ export function handleUploads(appDir?: string) {
     });
   });
 
-  app.delete('/:filename', (c) => {
+  app.delete('/:filename', async (c) => {
     const filename = c.req.param('filename');
     if (!filename) {
       return c.json({ ok: false, error: { code: 'validation', message: 'Filename required' } }, 400);
@@ -267,6 +323,15 @@ export function handleUploads(appDir?: string) {
     if (!EXT_TO_MIME[ext]) {
       return c.json({ ok: false, error: { code: 'not-found', message: 'Unknown filename' } }, 404);
     }
+    if (isSupabaseConfigured()) {
+      const client = getSupabaseAdmin();
+      const { error } = await client.storage.from(SUPABASE_UPLOAD_BUCKET).remove([safe]);
+      if (error) {
+        return c.json({ ok: false, error: { code: 'upload-failed', message: error.message } }, 502);
+      }
+      return c.json({ ok: true });
+    }
+
     const target = path.join(dir, safe);
     if (!fs.existsSync(target)) {
       return c.json({ ok: false, error: { code: 'not-found', message: 'File not found' } }, 404);

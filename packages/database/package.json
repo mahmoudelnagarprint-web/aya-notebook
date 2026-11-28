@@ -5,7 +5,9 @@
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./sqlite": "./src/aya-store.ts",
+    "./create-store": "./src/create-store.ts"
   },
   "scripts": {
     "generate": "prisma generate --schema prisma/schema.prisma",
@@ -14,6 +16,7 @@
   },
   "dependencies": {
     "@prisma/client": "^6.2.1",
-    "@ayatodoist/shared-types": "workspace:*"
+    "@ayatodoist/shared-types": "workspace:*",
+    "@supabase/supabase-js": "^2.47.10"
   }
 }

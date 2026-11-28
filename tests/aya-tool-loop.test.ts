@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Kernel, MemoryStore } from '@ayatodoist/core-kernel';
 import { tasksCorePlugin } from '@ayatodoist/plugin-tasks-core';
-import { SqliteAyaStore } from '@ayatodoist/database';
+import { SqliteAyaStore } from '@ayatodoist/database/sqlite';
 import { DEFAULT_AYA_SETTINGS, type AyaModel, type AyaProvider } from '@ayatodoist/shared-types';
 import { AyaBrain, claimsToolExecution, stripToolLeaks } from '../plugins/plugin-ai-agent/src/aya/brain';
 import { suggestRouting } from '../plugins/plugin-ai-agent/src/aya/routing';

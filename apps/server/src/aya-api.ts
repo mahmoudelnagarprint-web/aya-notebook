@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { Kernel } from '@ayatodoist/core-kernel';
-import type { SqliteAyaStore } from '@ayatodoist/database';
+import type { AyaStore } from '@ayatodoist/database';
 import type {
   AyaChannelId,
   AyaChannelRecord,
@@ -35,7 +35,7 @@ import { AyaProviderError } from '../../../plugins/plugin-ai-agent/src/aya/provi
 
 interface AyaApiDeps {
   kernel: Kernel;
-  store: SqliteAyaStore;
+  store: AyaStore;
   service: AyaService;
 }
 
@@ -62,15 +62,15 @@ function publicProvider(provider: AyaProvider & { models?: unknown[] }) {
   };
 }
 
-function readSettings(store: SqliteAyaStore): AyaSettings {
+function readSettings(store: AyaStore): AyaSettings {
   return { ...DEFAULT_AYA_SETTINGS, ...((store.getSettings() ?? {}) as Partial<AyaSettings>) } as AyaSettings;
 }
 
-function readRouting(store: SqliteAyaStore): AyaRouting {
+function readRouting(store: AyaStore): AyaRouting {
   return { ...DEFAULT_AYA_ROUTING, ...((store.getRouting() ?? {}) as Partial<AyaRouting>) } as AyaRouting;
 }
 
-function ensureChannels(store: SqliteAyaStore): AyaChannelRecord[] {
+function ensureChannels(store: AyaStore): AyaChannelRecord[] {
   const saved = store.listChannels() as AyaChannelRecord[];
   return (['telegram', 'whatsapp'] as AyaChannelId[]).map(
     (id) => saved.find((channel) => channel.id === id) ?? { id, enabled: false, config: {}, updatedAt: new Date(0).toISOString() },
@@ -85,7 +85,7 @@ async function readBody(c: { req: { json: () => Promise<unknown> } }): Promise<a
   }
 }
 
-function findConversationForMessage(store: SqliteAyaStore, messageId: string): string | null {
+function findConversationForMessage(store: AyaStore, messageId: string): string | null {
   for (const conversation of store.listConversations() as any[]) {
     const found = (store.listMessages(conversation.id) as any[]).some((message) => message.id === messageId);
     if (found) return conversation.id;

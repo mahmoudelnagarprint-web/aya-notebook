@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { Kernel, MemoryStore } from '@ayatodoist/core-kernel';
 import { tasksCorePlugin } from '@ayatodoist/plugin-tasks-core';
 import { checklistsPlugin, checklistToNote, noteToChecklist } from '@ayatodoist/plugin-checklists-media';
@@ -127,8 +127,22 @@ describe('uploads API', () => {
   const created: string[] = [];
   const app = handleUploads();
   const uploadDir = path.resolve(process.cwd(), 'data', 'uploads');
+  // Pin the local-disk backend: `bun test` loads .env, so a live Supabase
+  // project would otherwise receive these fixtures. The Supabase branch is
+  // exercised against a real project, not in the unit suite.
+  const savedEnv = {
+    url: process.env.SUPABASE_URL,
+    key: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  };
+
+  beforeAll(() => {
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  });
 
   afterAll(() => {
+    if (savedEnv.url) process.env.SUPABASE_URL = savedEnv.url;
+    if (savedEnv.key) process.env.SUPABASE_SERVICE_ROLE_KEY = savedEnv.key;
     for (const filename of created) {
       const target = path.join(uploadDir, filename);
       if (fs.existsSync(target)) fs.unlinkSync(target);

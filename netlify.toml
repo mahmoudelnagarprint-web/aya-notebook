@@ -1,0 +1,21 @@
+[build]
+  command = "bun run --cwd apps/web build"
+  publish = "apps/web/dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["@prisma/client"]
+
+# Every API route (Hono app) is served by the v2 function.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+# SPA fallback for the Vite bundle.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

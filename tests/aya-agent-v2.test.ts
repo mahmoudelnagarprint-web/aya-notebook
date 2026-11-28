@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Kernel, MemoryStore } from '@ayatodoist/core-kernel';
 import { tasksCorePlugin } from '@ayatodoist/plugin-tasks-core';
-import { SqliteAyaStore } from '@ayatodoist/database';
+import { SqliteAyaStore } from '@ayatodoist/database/sqlite';
 import {
   AYA_ROLES,
   DEFAULT_AYA_SETTINGS,
@@ -988,7 +988,12 @@ describe('Aya v2 — server mutations sync into the browser kernel', () => {
     clientKernel.start();
     expect(clientKernel.store.list('tasks')).toHaveLength(0);
 
-    const response = await createServerApp(serverKernel).request('/api/v1/bootstrap');
+    const serverApp = await createServerApp(serverKernel);
+    const response = await serverApp.request('/api/v1/bootstrap', {
+      // With API_KEY set in the environment (bun loads .env), non-browser callers
+      // must authenticate — a browser from the same origin would not need this.
+      headers: process.env.API_KEY ? { 'x-api-key': process.env.API_KEY } : {},
+    });
     expect(response.status).toBe(200);
     const payload = (await response.json()) as { snapshot?: { collections?: Record<string, unknown[]> } };
     const applied = hydrateKernelFromSnapshot(clientKernel, payload.snapshot!.collections!);

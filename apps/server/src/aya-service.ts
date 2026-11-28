@@ -1,6 +1,6 @@
 import type { Kernel } from '@ayatodoist/core-kernel';
 import type { AyaModel, AyaSettings } from '@ayatodoist/shared-types';
-import type { SqliteAyaStore } from '@ayatodoist/database';
+import type { AyaStore } from '@ayatodoist/database';
 import type { FetchedModel } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 import { cleanApiKey, fetchProviderModels, normalizeBaseUrl, probeModel, redactSecret } from '../../../plugins/plugin-ai-agent/src/aya/providers';
 
@@ -8,7 +8,7 @@ export const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.co
 
 interface AyaServiceOpts {
   kernel: Kernel;
-  adapter: SqliteAyaStore;
+  adapter: AyaStore;
   fetchImpl?: typeof fetch;
 }
 
@@ -23,7 +23,7 @@ const HEALTH_TICK_MS = 60_000;
 
 export class AyaService {
   private readonly kernel: Kernel;
-  private readonly adapter: SqliteAyaStore;
+  private readonly adapter: AyaStore;
   private readonly fetchImpl?: typeof fetch;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
 
